@@ -680,7 +680,8 @@ internal sealed record JsonColdStoreWriteManifest(
 internal sealed record JsonColdStoreRecoveryResult(
     int CompletedManifests,
     int FailedManifests,
-    int DeletedOrphanedStagedWrites = 0);
+    int DeletedOrphanedStagedWrites = 0,
+    int DeletedTemporaryFiles = 0);
 
 internal sealed record JsonColdStoreStartupValidationResult(int VerifiedRecords);
 

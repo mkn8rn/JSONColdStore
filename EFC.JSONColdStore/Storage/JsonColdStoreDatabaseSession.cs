@@ -48,6 +48,9 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
             if (acquireWriterLock)
                 writerLock = await JsonColdStoreDatabaseLock.AcquireAsync(options, cancellationToken);
 
+            var deletedTemporaryFiles = acquireWriterLock
+                ? JsonColdStoreTemporaryFileCleaner.DeleteOrphanedAtomicTempFiles(options.DatabaseDirectory)
+                : 0;
             var catalog = new JsonColdStoreCatalog(options);
             var metadata = acquireWriterLock
                 ? await catalog.EnsureInitializedAsync(cancellationToken)
@@ -60,6 +63,10 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
             var recoveryResult = acquireWriterLock
                 ? await records.RecoverPendingManifestsAsync(cancellationToken)
                 : new JsonColdStoreRecoveryResult(0, 0);
+            recoveryResult = recoveryResult with
+            {
+                DeletedTemporaryFiles = deletedTemporaryFiles,
+            };
             var startupValidationResult = options.StartupMode == JsonColdStoreStartupMode.FullHydration
                 ? await records.VerifyAllRecordsAsync(cancellationToken)
                 : new JsonColdStoreStartupValidationResult(0);

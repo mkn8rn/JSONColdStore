@@ -74,6 +74,61 @@ public sealed class JsonColdStoreDatabaseSessionTests
     }
 
     [Fact]
+    public async Task OpenAsyncDeletesOrphanedAtomicTempFilesAfterWriterLock()
+    {
+        var root = NewTempDirectory();
+        var outsideTemp = Path.Combine(Path.GetDirectoryName(root)!, "outside.jcs.tmp-orphan");
+        var rootTemp = Path.Combine(root, "_store.json.tmp-orphan");
+        var entityDirectory = Path.Combine(root, "entities", "Entity", "records");
+        var nestedTemp = Path.Combine(entityDirectory, "1.jcs.tmp-orphan");
+        var snapshotDirectory = Path.Combine(root, "_snapshots", "snapshot-1");
+        var snapshotTemp = Path.Combine(snapshotDirectory, "kept.jcs.tmp-orphan");
+        Directory.CreateDirectory(entityDirectory);
+        Directory.CreateDirectory(snapshotDirectory);
+        await File.WriteAllTextAsync(rootTemp, "root temp");
+        await File.WriteAllTextAsync(nestedTemp, "nested temp");
+        await File.WriteAllTextAsync(snapshotTemp, "snapshot temp");
+        await File.WriteAllTextAsync(outsideTemp, "outside temp");
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+
+        try
+        {
+            await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+
+            Assert.Equal(2, session.RecoveryResult.DeletedTemporaryFiles);
+            Assert.False(File.Exists(rootTemp));
+            Assert.False(File.Exists(nestedTemp));
+            Assert.True(File.Exists(snapshotTemp));
+            Assert.True(File.Exists(outsideTemp));
+        }
+        finally
+        {
+            if (File.Exists(outsideTemp))
+                File.Delete(outsideTemp);
+        }
+    }
+
+    [Fact]
+    public async Task OpenAsyncWithoutWriterLockDoesNotDeleteOrphanedAtomicTempFiles()
+    {
+        var root = NewTempDirectory();
+        var rootTemp = Path.Combine(root, "_store.json.tmp-orphan");
+        await File.WriteAllTextAsync(rootTemp, "root temp");
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(
+            options,
+            acquireWriterLock: false);
+
+        Assert.Equal(0, session.RecoveryResult.DeletedTemporaryFiles);
+        Assert.True(File.Exists(rootTemp));
+    }
+
+    [Fact]
     public async Task OpenAsyncWithoutWriterLockRejectsRecordWrites()
     {
         var root = NewTempDirectory();

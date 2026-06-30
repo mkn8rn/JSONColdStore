@@ -1090,6 +1090,8 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     {
         var directory = TestDirectory("diagnostics-counts-" + Guid.NewGuid().ToString("N"));
         using var key = JsonColdStoreEncryptionKey.FromBytes(Enumerable.Range(0, 32).Select(value => (byte)value).ToArray());
+        var integrityKeyBytes = Enumerable.Range(0, 32).Select(value => (byte)(255 - value)).ToArray();
+        using var integrityKey = JsonColdStoreIntegrityKey.FromBytes(integrityKeyBytes);
         var builder = new DbContextOptionsBuilder<WritableDbContext>();
         builder.UseJsonColdStoreDatabase(
             directory,
@@ -1100,6 +1102,7 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
                     Key = key,
                     KeyId = "diagnostic-key-id",
                 })
+                .UseIntegrityKey(integrityKey)
                 .UseEventLog(enabled: true, TimeSpan.FromDays(7))
                 .UseSnapshots(enabled: true, TimeSpan.FromHours(1), retentionCount: 2));
         var id = Guid.Parse("53000000-0000-0000-0000-000000000001");
@@ -1126,8 +1129,11 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         Assert.Equal(1, diagnostics.Entities[0].RecordFileCount);
         Assert.Equal(2, diagnostics.Entities[0].IndexFileCount);
         Assert.True(diagnostics.EncryptionEnabled);
+        Assert.True(diagnostics.IntegrityChecksumsEnabled);
+        Assert.True(diagnostics.KeyedIntegrityEnabled);
         Assert.DoesNotContain(directory, serialized, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("diagnostic-key-id", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(Convert.ToBase64String(integrityKeyBytes), serialized, StringComparison.Ordinal);
         Assert.DoesNotContain(id.ToString(), serialized, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("diagnostic payload", serialized, StringComparison.Ordinal);
     }
@@ -1189,6 +1195,7 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     {
         var directory = TestDirectory("diagnostics-encryption-no-metadata-" + Guid.NewGuid().ToString("N"));
         using var key = JsonColdStoreEncryptionKey.FromBytes(new byte[32]);
+        using var integrityKey = JsonColdStoreIntegrityKey.FromBytes(Enumerable.Repeat((byte)6, 32).ToArray());
         var builder = new DbContextOptionsBuilder<WritableDbContext>();
         builder.UseJsonColdStoreDatabase(
             directory,
@@ -1198,7 +1205,8 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
                 {
                     Key = key,
                     KeyId = "diagnostics-no-metadata-key",
-                }));
+                })
+                .UseIntegrityKey(integrityKey));
 
         using var context = new WritableDbContext(builder.Options);
         var diagnostics = await context.Database.GetJsonColdStoreDiagnosticsAsync();
@@ -1206,6 +1214,8 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
 
         Assert.False(diagnostics.HasStoreMetadata);
         Assert.True(diagnostics.EncryptionEnabled);
+        Assert.True(diagnostics.IntegrityChecksumsEnabled);
+        Assert.True(diagnostics.KeyedIntegrityEnabled);
         Assert.DoesNotContain("diagnostics-no-metadata-key", serialized, StringComparison.Ordinal);
         Assert.False(File.Exists(Path.Combine(directory, "_store.json")));
         Assert.False(File.Exists(Path.Combine(directory, "_model.json")));

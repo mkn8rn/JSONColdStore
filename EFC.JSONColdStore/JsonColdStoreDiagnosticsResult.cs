@@ -23,6 +23,12 @@ public sealed record JsonColdStoreDiagnosticsResult
     /// <summary>Whether payload encryption is enabled by metadata or current options.</summary>
     public bool EncryptionEnabled { get; init; }
 
+    /// <summary>Whether payload integrity tags are enabled by current options.</summary>
+    public bool IntegrityChecksumsEnabled { get; init; }
+
+    /// <summary>Whether payload integrity tags use a host-forwarded HMAC key.</summary>
+    public bool KeyedIntegrityEnabled { get; init; }
+
     /// <summary>Startup mode recorded by root metadata or current options.</summary>
     public JsonColdStoreStartupMode StartupMode { get; init; }
 

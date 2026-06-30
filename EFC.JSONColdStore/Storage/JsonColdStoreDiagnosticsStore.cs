@@ -31,6 +31,8 @@ internal sealed class JsonColdStoreDiagnosticsStore
             ProviderVersion = metadata?.ProviderVersion,
             Compression = metadata?.Policy.Compression ?? _options.Compression,
             EncryptionEnabled = metadata?.Policy.EncryptionEnabled ?? _options.Encryption is not null,
+            IntegrityChecksumsEnabled = _options.Integrity.EnableChecksums,
+            KeyedIntegrityEnabled = _options.Integrity.Key is not null,
             StartupMode = metadata?.Policy.StartupMode ?? _options.StartupMode,
             FullScanPolicy = metadata?.Policy.FullScanPolicy ?? _options.FullScanPolicy,
             MappedEntityCount = entityDiagnostics.Length,

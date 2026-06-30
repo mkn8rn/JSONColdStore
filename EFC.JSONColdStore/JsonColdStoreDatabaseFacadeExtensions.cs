@@ -125,4 +125,39 @@ public static class JsonColdStoreDatabaseFacadeExtensions
 
         return await entityStore.RebuildIndexesAsync<TEntity>(cancellationToken);
     }
+
+    /// <summary>
+    /// Verifies JSONColdStore records and compatible legacy records without mutating storage.
+    /// </summary>
+    public static async Task<JsonColdStoreVerificationResult> VerifyJsonColdStoreAsync(
+        this DatabaseFacade database,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+
+        var context = database.GetService<ICurrentDbContext>().Context;
+        var storeOptions = database.GetService<IDbContextOptions>()
+            .FindExtension<JsonColdStoreOptionsExtension>()?.Options
+            ?? throw new InvalidOperationException("JSONColdStore options are not configured.");
+        var verificationOptions = storeOptions with
+        {
+            Integrity = storeOptions.Integrity with
+            {
+                VerifyOnRead = storeOptions.Integrity.EnableChecksums,
+            },
+        };
+
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(
+            verificationOptions,
+            acquireWriterLock: false,
+            cancellationToken);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(context.Model));
+
+        var result = await entityStore.VerifyEntitiesAsync(cancellationToken);
+        return new JsonColdStoreVerificationResult(
+            result.VerifiedRecords,
+            result.VerifiedLegacyRecords);
+    }
 }

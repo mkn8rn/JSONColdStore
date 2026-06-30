@@ -228,6 +228,50 @@ internal sealed class JsonColdStoreEntityRecordStore
         return records;
     }
 
+    internal async Task<JsonColdStoreEntityVerificationResult> VerifyEntitiesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureModelCatalogAsync(createIfMissing: false, cancellationToken);
+        var verifiedRecords = 0;
+        var verifiedLegacyRecords = 0;
+
+        foreach (var descriptor in _modelDescriptor.Entities)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            await foreach (var payload in _session.Records.ReadAllRecordsAsync(
+                descriptor.EntityName,
+                cancellationToken))
+            {
+                VerifyPayload(payload, descriptor.ClrType, descriptor.EntityName);
+                verifiedRecords++;
+            }
+
+            await foreach (var legacyRecord in _session.LegacyRecords.ReadAllRecordsAsync(
+                descriptor,
+                cancellationToken))
+            {
+                VerifyPayload(legacyRecord.Payload, descriptor.ClrType, descriptor.EntityName);
+                verifiedLegacyRecords++;
+            }
+        }
+
+        return new JsonColdStoreEntityVerificationResult(
+            verifiedRecords,
+            verifiedLegacyRecords);
+    }
+
+    private static void VerifyPayload(
+        byte[] payload,
+        Type entityType,
+        string entityName)
+    {
+        var entity = JsonSerializer.Deserialize(payload, entityType, EntityReadJsonOptions);
+        if (entity is null)
+            throw new InvalidDataException(
+                $"The JSONColdStore record for '{entityName}' deserialized to null.");
+    }
+
     internal async Task DeleteEntityAsync(
         object entity,
         Type entityType,
@@ -374,3 +418,7 @@ internal sealed class JsonColdStoreEntityRecordStore
         }
     }
 }
+
+internal sealed record JsonColdStoreEntityVerificationResult(
+    int VerifiedRecords,
+    int VerifiedLegacyRecords);

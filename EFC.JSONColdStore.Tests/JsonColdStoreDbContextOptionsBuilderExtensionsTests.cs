@@ -2014,6 +2014,83 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task LinqAnyWithoutPredicateUsesBoundedScanWithoutSilentScan()
+    {
+        var directory = TestDirectory("query-any-bounded-scan-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseChecksums(verifyOnStartup: true, verifyOnRead: true));
+        using var context = new WritableDbContext(builder.Options);
+        var expectedId = Guid.Parse("85000000-0000-0000-0000-000000000001");
+        var corruptId = Guid.Parse("85000000-0000-0000-0000-000000000002");
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = expectedId,
+                Value = "bounded-any",
+            },
+            new WritableEntity
+            {
+                Id = corruptId,
+                Value = "corrupt-bounded-any",
+            });
+        context.SaveChanges();
+        await CorruptCurrentRecordFilesAfterFirstAsync(directory);
+
+        Assert.True(context.Entities.Any());
+    }
+
+    [Fact]
+    public async Task LinqTakeWithoutPredicateUsesBoundedScanWithoutSilentScan()
+    {
+        var directory = TestDirectory("query-take-bounded-scan-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseChecksums(verifyOnStartup: true, verifyOnRead: true));
+        using var context = new WritableDbContext(builder.Options);
+        var expectedId = Guid.Parse("85000000-0000-0000-0000-000000000003");
+        var corruptId = Guid.Parse("85000000-0000-0000-0000-000000000004");
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = expectedId,
+                Value = "bounded-take",
+            },
+            new WritableEntity
+            {
+                Id = corruptId,
+                Value = "corrupt-bounded-take",
+            });
+        context.SaveChanges();
+        var expectedBoundedId = await CorruptCurrentRecordFilesAfterFirstAsync(directory);
+
+        var ids = context.Entities
+            .Take(1)
+            .Select(entity => entity.Id)
+            .ToList();
+
+        Assert.Equal([expectedBoundedId], ids);
+    }
+
+    [Fact]
+    public void LinqAnyWithoutPredicateReturnsFalseForEmptyStore()
+    {
+        var directory = TestDirectory("query-any-empty-bounded-scan-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+        context.Database.EnsureCreated();
+
+        Assert.False(context.Entities.Any());
+    }
+
+    [Fact]
     public void LinqProjectionStillThrowsWhenFullScanWouldBeRequiredByDefault()
     {
         var directory = TestDirectory("query-projection-unsupported-" + Guid.NewGuid().ToString("N"));
@@ -2099,10 +2176,43 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
             [.. JsonColdStoreRecordStore.GetRecordPathSegments(
                 typeof(WritableEntity).FullName!,
                 id.ToString())]);
+        await CorruptStoredRecordFileAsync(recordPath);
+        return recordPath;
+    }
+
+    private static async Task<Guid> CorruptCurrentRecordFilesAfterFirstAsync(string directory)
+    {
+        var recordsDirectory = JsonColdStorePathValidator.GetSafeChildPath(
+            directory,
+            "entities",
+            JsonColdStoreNameEncoder.EncodePathSegment(typeof(WritableEntity).FullName!),
+            "records");
+        var recordFiles = Directory.EnumerateFiles(recordsDirectory, "*.jcs")
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        Assert.True(recordFiles.Length >= 2);
+
+        var storageOptions = new JsonColdStoreOptionsBuilder(directory)
+            .UseFsyncOnWrite(false)
+            .UseChecksums(verifyOnStartup: true, verifyOnRead: true)
+            .Build();
+        var firstPayload = JsonColdStorePayloadCodec.Decode(
+            await File.ReadAllBytesAsync(recordFiles[0]),
+            storageOptions);
+        var firstEntity = JsonSerializer.Deserialize<WritableEntity>(firstPayload);
+        Assert.NotNull(firstEntity);
+
+        foreach (var recordFile in recordFiles.Skip(1))
+            await CorruptStoredRecordFileAsync(recordFile);
+
+        return firstEntity.Id;
+    }
+
+    private static async Task CorruptStoredRecordFileAsync(string recordPath)
+    {
         var bytes = await File.ReadAllBytesAsync(recordPath);
         bytes[^1] ^= 0x7F;
         await File.WriteAllBytesAsync(recordPath, bytes);
-        return recordPath;
     }
 
     private static byte[] EncryptLegacyPayload(ReadOnlySpan<byte> plaintext, JsonColdStoreEncryptionKey key)

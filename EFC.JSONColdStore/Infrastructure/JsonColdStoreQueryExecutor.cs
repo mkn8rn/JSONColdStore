@@ -417,6 +417,23 @@ internal static class JsonColdStoreQueryExecutor
             return indexed.ToList();
         }
 
+        var boundedScanLimit = TryCreateUnorderedPureScanLimit(queryContext, plan);
+        if (boundedScanLimit is not null)
+        {
+            var boundedResults = new List<TEntity>();
+            if (boundedScanLimit.Value <= 0)
+                return boundedResults;
+
+            await foreach (var entity in entityStore.ScanEntitiesAsync<TEntity>(cancellationToken))
+            {
+                boundedResults.Add(entity);
+                if (boundedResults.Count >= boundedScanLimit.Value)
+                    break;
+            }
+
+            return boundedResults;
+        }
+
         if (options.FullScanPolicy != JsonColdStoreScanPolicy.AllowSilentScans)
         {
             throw Unsupported(
@@ -440,6 +457,27 @@ internal static class JsonColdStoreQueryExecutor
             return null;
 
         if (!HasOnlyEquivalentSeekFilter(queryContext, plan, seek))
+            return null;
+
+        var take = plan.Take is null
+            ? (int?)null
+            : EvaluateNonNegativeInt(queryContext, plan.Take, "Take");
+
+        return plan.Terminal switch
+        {
+            JsonColdStoreQueryTerminal.Sequence when take is not null => take.Value,
+            JsonColdStoreQueryTerminal.First => take is null ? 1 : Math.Min(take.Value, 1),
+            JsonColdStoreQueryTerminal.FirstOrDefault => take is null ? 1 : Math.Min(take.Value, 1),
+            JsonColdStoreQueryTerminal.Any => take is null ? 1 : Math.Min(take.Value, 1),
+            _ => null,
+        };
+    }
+
+    private static int? TryCreateUnorderedPureScanLimit(
+        QueryContext queryContext,
+        JsonColdStoreQueryPlan plan)
+    {
+        if (plan.Filters.Count > 0 || plan.Orderings.Count > 0 || plan.Skip is not null)
             return null;
 
         var take = plan.Take is null

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace EFC.JSONColdStore.Infrastructure;
@@ -39,6 +40,9 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
         }
 
         var keyProperty = primaryKey.Properties[0];
+        var keyPropertyInfo = keyProperty.PropertyInfo
+            ?? throw new NotSupportedException(
+                $"JSONColdStore entity '{entityType.Name}' must use a CLR property-backed primary key.");
         var indexes = entityType.GetIndexes()
             .Select(index => new JsonColdStoreIndexDescriptor(
                 index.Properties.Select(property => property.Name).ToArray(),
@@ -50,6 +54,7 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
             GetStorageEntityName(entityType),
             entityType.ClrType,
             new JsonColdStoreKeyDescriptor(keyProperty.Name, keyProperty.ClrType),
+            keyPropertyInfo,
             indexes);
     }
 
@@ -63,9 +68,22 @@ internal sealed record JsonColdStoreEntityDescriptor(
     string EntityName,
     Type ClrType,
     JsonColdStoreKeyDescriptor Key,
+    PropertyInfo KeyProperty,
     IReadOnlyList<JsonColdStoreIndexDescriptor> Indexes)
 {
     internal string CreateRecordId(object? keyValue) => Key.CreateRecordId(keyValue);
+
+    internal string CreateRecordIdFromEntity(object entity)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        if (!ClrType.IsInstanceOfType(entity))
+        {
+            throw new InvalidOperationException(
+                $"The entity instance is not assignable to '{ClrType.FullName ?? ClrType.Name}'.");
+        }
+
+        return CreateRecordId(KeyProperty.GetValue(entity));
+    }
 }
 
 internal sealed record JsonColdStoreKeyDescriptor(string PropertyName, Type ClrType)

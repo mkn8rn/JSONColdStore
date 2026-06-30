@@ -1,0 +1,157 @@
+using System.Text.Json;
+
+namespace EFC.JSONColdStore.Storage;
+
+internal sealed class JsonColdStoreIndexStore
+{
+    private static readonly JsonSerializerOptions IndexJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true,
+    };
+
+    private readonly JsonColdStoreOptions _options;
+
+    internal JsonColdStoreIndexStore(JsonColdStoreOptions options)
+    {
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+    }
+
+    internal async Task UpsertAsync(
+        string entityName,
+        string indexName,
+        string indexKey,
+        string recordId,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateIndexInput(indexName, indexKey, recordId);
+
+        var document = await ReadDocumentAsync(entityName, indexName, cancellationToken);
+        RemoveRecordId(document, recordId);
+
+        if (!document.Buckets.TryGetValue(indexKey, out var bucket))
+        {
+            bucket = [];
+            document.Buckets[indexKey] = bucket;
+        }
+
+        if (!bucket.Contains(recordId, StringComparer.Ordinal))
+            bucket.Add(recordId);
+
+        await WriteDocumentAsync(entityName, indexName, Normalize(document), cancellationToken);
+    }
+
+    internal async Task RemoveAsync(
+        string entityName,
+        string indexName,
+        string recordId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(indexName))
+            throw new ArgumentException("An index name is required.", nameof(indexName));
+        if (string.IsNullOrWhiteSpace(recordId))
+            throw new ArgumentException("A record id is required.", nameof(recordId));
+
+        var document = await ReadDocumentAsync(entityName, indexName, cancellationToken);
+        RemoveRecordId(document, recordId);
+        await WriteDocumentAsync(entityName, indexName, Normalize(document), cancellationToken);
+    }
+
+    internal async Task<IReadOnlyList<string>> ReadRecordIdsAsync(
+        string entityName,
+        string indexName,
+        string indexKey,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateIndexInput(indexName, indexKey, recordId: "probe");
+
+        var document = await ReadDocumentAsync(entityName, indexName, cancellationToken);
+        return document.Buckets.TryGetValue(indexKey, out var bucket)
+            ? bucket.Order(StringComparer.Ordinal).ToArray()
+            : [];
+    }
+
+    private async Task<JsonColdStoreIndexDocument> ReadDocumentAsync(
+        string entityName,
+        string indexName,
+        CancellationToken cancellationToken)
+    {
+        var path = GetIndexPath(entityName, indexName);
+        if (!File.Exists(path))
+            return new JsonColdStoreIndexDocument(new Dictionary<string, List<string>>(StringComparer.Ordinal));
+
+        await using var stream = File.OpenRead(path);
+        var document = await JsonSerializer.DeserializeAsync<JsonColdStoreIndexDocument>(
+            stream,
+            IndexJsonOptions,
+            cancellationToken);
+
+        return document ?? new JsonColdStoreIndexDocument(new Dictionary<string, List<string>>(StringComparer.Ordinal));
+    }
+
+    private async Task WriteDocumentAsync(
+        string entityName,
+        string indexName,
+        JsonColdStoreIndexDocument document,
+        CancellationToken cancellationToken)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(document, IndexJsonOptions);
+        await JsonColdStoreAtomicFileWriter.WriteAsync(
+            _options.DatabaseDirectory,
+            GetIndexPathSegments(entityName, indexName),
+            bytes,
+            _options.FsyncOnWrite,
+            cancellationToken);
+    }
+
+    private static void RemoveRecordId(JsonColdStoreIndexDocument document, string recordId)
+    {
+        foreach (var key in document.Buckets.Keys.ToArray())
+        {
+            document.Buckets[key] = document.Buckets[key]
+                .Where(existing => !string.Equals(existing, recordId, StringComparison.Ordinal))
+                .ToList();
+
+            if (document.Buckets[key].Count == 0)
+                document.Buckets.Remove(key);
+        }
+    }
+
+    private static JsonColdStoreIndexDocument Normalize(JsonColdStoreIndexDocument document)
+    {
+        var buckets = document.Buckets
+            .Where(pair => pair.Value.Count > 0)
+            .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+            .ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList(),
+                StringComparer.Ordinal);
+
+        return new JsonColdStoreIndexDocument(buckets);
+    }
+
+    private string GetIndexPath(string entityName, string indexName) =>
+        JsonColdStorePathValidator.GetSafeChildPath(
+            _options.DatabaseDirectory,
+            [.. GetIndexPathSegments(entityName, indexName)]);
+
+    private static string[] GetIndexPathSegments(string entityName, string indexName) =>
+    [
+        "entities",
+        JsonColdStoreNameEncoder.EncodePathSegment(entityName),
+        "indexes",
+        JsonColdStoreNameEncoder.EncodePathSegment(indexName) + ".json",
+    ];
+
+    private static void ValidateIndexInput(string indexName, string indexKey, string recordId)
+    {
+        if (string.IsNullOrWhiteSpace(indexName))
+            throw new ArgumentException("An index name is required.", nameof(indexName));
+        if (string.IsNullOrWhiteSpace(indexKey))
+            throw new ArgumentException("An index key is required.", nameof(indexKey));
+        if (string.IsNullOrWhiteSpace(recordId))
+            throw new ArgumentException("A record id is required.", nameof(recordId));
+    }
+}
+
+internal sealed record JsonColdStoreIndexDocument(Dictionary<string, List<string>> Buckets);

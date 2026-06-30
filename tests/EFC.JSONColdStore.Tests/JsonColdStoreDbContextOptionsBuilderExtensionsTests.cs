@@ -264,6 +264,45 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncUsesDeclaredIndexFiles()
+    {
+        var directory = TestDirectory("facade-index-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("40000000-0000-0000-0000-000000000001"),
+                Value = "match",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("40000000-0000-0000-0000-000000000002"),
+                Value = "skip",
+            });
+        context.SaveChanges();
+
+        var matches = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>("Value", "match");
+
+        Assert.Single(matches);
+        Assert.Equal("match", matches[0].Value);
+    }
+
+    [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncRejectsUndeclaredIndex()
+    {
+        var directory = TestDirectory("facade-index-missing-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+        context.Database.EnsureCreated();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>("Missing", "value"));
+    }
+
+    [Fact]
     public void QueryThrowsClearUnsupportedMessageUntilQueryPipelineExists()
     {
         var directory = TestDirectory("query-unsupported-" + Guid.NewGuid().ToString("N"));
@@ -294,7 +333,11 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
-            modelBuilder.Entity<WritableEntity>(entity => entity.HasKey(value => value.Id));
+            modelBuilder.Entity<WritableEntity>(entity =>
+            {
+                entity.HasKey(value => value.Id);
+                entity.HasIndex(value => value.Value);
+            });
         }
     }
 

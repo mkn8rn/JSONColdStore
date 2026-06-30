@@ -66,4 +66,37 @@ public static class JsonColdStoreDatabaseFacadeExtensions
 
         return results;
     }
+
+    /// <summary>
+    /// Reads stored entities by a declared single-property JSONColdStore index.
+    /// </summary>
+    public static async Task<IReadOnlyList<TEntity>> ReadJsonColdStoreIndexAsync<TEntity>(
+        this DatabaseFacade database,
+        string propertyName,
+        object indexValue,
+        CancellationToken cancellationToken = default)
+        where TEntity : class
+    {
+        ArgumentNullException.ThrowIfNull(database);
+        ArgumentException.ThrowIfNullOrWhiteSpace(propertyName);
+        ArgumentNullException.ThrowIfNull(indexValue);
+
+        var context = database.GetService<ICurrentDbContext>().Context;
+        var storeOptions = database.GetService<IDbContextOptions>()
+            .FindExtension<JsonColdStoreOptionsExtension>()?.Options
+            ?? throw new InvalidOperationException("JSONColdStore options are not configured.");
+
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(
+            storeOptions,
+            acquireWriterLock: false,
+            cancellationToken);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(context.Model));
+
+        return await entityStore.ReadEntitiesByIndexAsync<TEntity>(
+            propertyName,
+            indexValue,
+            cancellationToken);
+    }
 }

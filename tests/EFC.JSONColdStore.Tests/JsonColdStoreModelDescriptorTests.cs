@@ -31,6 +31,7 @@ public sealed class JsonColdStoreModelDescriptorTests
             Guid.Parse("a4b40f00-6a1b-48dd-b544-9b6924e0f4f2")));
         Assert.Contains(entity.Indexes, index => index.PropertyNames.SequenceEqual(["ConsumerId"]));
         Assert.Contains(entity.Indexes, index => index.PropertyNames.SequenceEqual(["ConsumerId", "CreatedAt"]));
+        Assert.Equal("ConsumerId", entity.FindSinglePropertyIndex("ConsumerId").StorageName);
     }
 
     [Fact]
@@ -69,6 +70,21 @@ public sealed class JsonColdStoreModelDescriptorTests
 
         Assert.Throws<InvalidOperationException>(() => key.CreateRecordId(null));
         Assert.Throws<InvalidOperationException>(() => key.CreateRecordId(" "));
+    }
+
+    [Fact]
+    public void FindSinglePropertyIndexRejectsUndeclaredIndex()
+    {
+        var descriptor = JsonColdStoreModelDescriptor.Create(CreateModel(modelBuilder =>
+        {
+            modelBuilder.Entity<ConsumerEvent>(entity =>
+            {
+                entity.HasKey(value => value.Id);
+                entity.HasIndex(value => value.ConsumerId);
+            });
+        })).FindEntity(typeof(ConsumerEvent));
+
+        Assert.Throws<InvalidOperationException>(() => descriptor.FindSinglePropertyIndex("Missing"));
     }
 
     private static IModel CreateModel(Action<ModelBuilder> configure)

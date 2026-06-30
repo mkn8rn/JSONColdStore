@@ -44,9 +44,19 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
             ?? throw new NotSupportedException(
                 $"JSONColdStore entity '{entityType.Name}' must use a CLR property-backed primary key.");
         var indexes = entityType.GetIndexes()
-            .Select(index => new JsonColdStoreIndexDescriptor(
-                index.Properties.Select(property => property.Name).ToArray(),
-                index.IsUnique))
+            .Select(index =>
+            {
+                var properties = index.Properties
+                    .Select(property => property.PropertyInfo
+                        ?? throw new NotSupportedException(
+                            $"JSONColdStore index on entity '{entityType.Name}' must use CLR property-backed members."))
+                    .ToArray();
+
+                return new JsonColdStoreIndexDescriptor(
+                    index.Properties.Select(property => property.Name).ToArray(),
+                    properties,
+                    index.IsUnique);
+            })
             .OrderBy(index => string.Join("|", index.PropertyNames), StringComparer.Ordinal)
             .ToArray();
 
@@ -84,6 +94,18 @@ internal sealed record JsonColdStoreEntityDescriptor(
 
         return CreateRecordId(KeyProperty.GetValue(entity));
     }
+
+    internal JsonColdStoreIndexDescriptor FindSinglePropertyIndex(string propertyName)
+    {
+        if (string.IsNullOrWhiteSpace(propertyName))
+            throw new ArgumentException("An index property name is required.", nameof(propertyName));
+
+        return Indexes.FirstOrDefault(index =>
+                index.PropertyNames.Length == 1
+                && string.Equals(index.PropertyNames[0], propertyName, StringComparison.Ordinal))
+            ?? throw new InvalidOperationException(
+                $"The entity type '{ClrType.FullName ?? ClrType.Name}' does not declare a JSONColdStore index on '{propertyName}'.");
+    }
 }
 
 internal sealed record JsonColdStoreKeyDescriptor(string PropertyName, Type ClrType)
@@ -103,4 +125,33 @@ internal sealed record JsonColdStoreKeyDescriptor(string PropertyName, Type ClrT
     }
 }
 
-internal sealed record JsonColdStoreIndexDescriptor(string[] PropertyNames, bool IsUnique);
+internal sealed record JsonColdStoreIndexDescriptor(
+    string[] PropertyNames,
+    PropertyInfo[] Properties,
+    bool IsUnique)
+{
+    internal string StorageName => string.Join("__", PropertyNames);
+
+    internal string CreateIndexKeyFromEntity(object entity)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        return CreateIndexKey(Properties.Select(property => property.GetValue(entity)));
+    }
+
+    internal string CreateIndexKeyFromValues(params object?[] values)
+    {
+        if (values.Length != PropertyNames.Length)
+        {
+            throw new ArgumentException(
+                "Index value count must match the index property count.",
+                nameof(values));
+        }
+
+        return CreateIndexKey(values);
+    }
+
+    private static string CreateIndexKey(IEnumerable<object?> values) =>
+        string.Join(
+            "\u001F",
+            values.Select(value => Convert.ToString(value, CultureInfo.InvariantCulture) ?? "<null>"));
+}

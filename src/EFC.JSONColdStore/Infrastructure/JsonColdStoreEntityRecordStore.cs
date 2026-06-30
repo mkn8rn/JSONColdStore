@@ -12,6 +12,7 @@ internal sealed class JsonColdStoreEntityRecordStore
 
     private readonly JsonColdStoreDatabaseSession _session;
     private readonly JsonColdStoreModelDescriptor _modelDescriptor;
+    private readonly JsonColdStoreIndexStore _indexStore;
 
     internal JsonColdStoreEntityRecordStore(
         JsonColdStoreDatabaseSession session,
@@ -19,6 +20,7 @@ internal sealed class JsonColdStoreEntityRecordStore
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _modelDescriptor = modelDescriptor ?? throw new ArgumentNullException(nameof(modelDescriptor));
+        _indexStore = new JsonColdStoreIndexStore(session.Options);
     }
 
     internal async Task WriteEntityAsync<TEntity>(
@@ -47,6 +49,8 @@ internal sealed class JsonColdStoreEntityRecordStore
             recordId,
             payload,
             cancellationToken);
+
+        await UpsertIndexesAsync(descriptor, entity, recordId, cancellationToken);
     }
 
     internal async Task<TEntity?> ReadEntityAsync<TEntity>(
@@ -65,6 +69,40 @@ internal sealed class JsonColdStoreEntityRecordStore
             cancellationToken);
 
         return JsonSerializer.Deserialize<TEntity>(payload, EntityJsonOptions);
+    }
+
+    internal async Task<IReadOnlyList<TEntity>> ReadEntitiesByIndexAsync<TEntity>(
+        string propertyName,
+        object indexValue,
+        CancellationToken cancellationToken = default)
+        where TEntity : class
+    {
+        var descriptor = _modelDescriptor.FindEntity(typeof(TEntity));
+        var index = descriptor.FindSinglePropertyIndex(propertyName);
+        var indexKey = index.CreateIndexKeyFromValues(indexValue);
+        var recordIds = await _indexStore.ReadRecordIdsAsync(
+            descriptor.EntityName,
+            index.StorageName,
+            indexKey,
+            cancellationToken);
+        var results = new List<TEntity>();
+
+        foreach (var recordId in recordIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_session.Records.RecordExists(descriptor.EntityName, recordId))
+                continue;
+
+            var payload = await _session.Records.ReadRecordAsync(
+                descriptor.EntityName,
+                recordId,
+                cancellationToken);
+            var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityJsonOptions);
+            if (entity is not null)
+                results.Add(entity);
+        }
+
+        return results;
     }
 
     internal async IAsyncEnumerable<TEntity> ScanEntitiesAsync<TEntity>(
@@ -97,5 +135,39 @@ internal sealed class JsonColdStoreEntityRecordStore
             descriptor.EntityName,
             recordId,
             cancellationToken);
+
+        await RemoveIndexesAsync(descriptor, recordId, cancellationToken);
+    }
+
+    private async Task UpsertIndexesAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        object entity,
+        string recordId,
+        CancellationToken cancellationToken)
+    {
+        foreach (var index in descriptor.Indexes)
+        {
+            await _indexStore.UpsertAsync(
+                descriptor.EntityName,
+                index.StorageName,
+                index.CreateIndexKeyFromEntity(entity),
+                recordId,
+                cancellationToken);
+        }
+    }
+
+    private async Task RemoveIndexesAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        string recordId,
+        CancellationToken cancellationToken)
+    {
+        foreach (var index in descriptor.Indexes)
+        {
+            await _indexStore.RemoveAsync(
+                descriptor.EntityName,
+                index.StorageName,
+                recordId,
+                cancellationToken);
+        }
     }
 }

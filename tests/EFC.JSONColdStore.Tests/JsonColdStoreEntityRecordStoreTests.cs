@@ -44,6 +44,90 @@ public sealed class JsonColdStoreEntityRecordStoreTests
     }
 
     [Fact]
+    public async Task WriteEntityAsyncMaintainsDeclaredIndex()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(CreateModel()));
+        var first = new ConsumerEvent
+        {
+            Id = Guid.Parse("10000000-0000-0000-0000-000000000001"),
+            ConsumerId = "consumer-a",
+            Payload = "first",
+        };
+        var second = new ConsumerEvent
+        {
+            Id = Guid.Parse("10000000-0000-0000-0000-000000000002"),
+            ConsumerId = "consumer-b",
+            Payload = "second",
+        };
+
+        await entityStore.WriteEntityAsync(first);
+        await entityStore.WriteEntityAsync(second);
+
+        var indexed = await entityStore.ReadEntitiesByIndexAsync<ConsumerEvent>("ConsumerId", "consumer-a");
+        Assert.Single(indexed);
+        Assert.Equal(first.Id, indexed[0].Id);
+    }
+
+    [Fact]
+    public async Task WriteEntityAsyncMovesUpdatedRecordBetweenIndexBuckets()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(CreateModel()));
+        var entity = new ConsumerEvent
+        {
+            Id = Guid.Parse("20000000-0000-0000-0000-000000000001"),
+            ConsumerId = "old",
+            Payload = "value",
+        };
+
+        await entityStore.WriteEntityAsync(entity);
+        entity.ConsumerId = "new";
+        await entityStore.WriteEntityAsync(entity);
+
+        Assert.Empty(await entityStore.ReadEntitiesByIndexAsync<ConsumerEvent>("ConsumerId", "old"));
+        var indexed = await entityStore.ReadEntitiesByIndexAsync<ConsumerEvent>("ConsumerId", "new");
+        Assert.Single(indexed);
+        Assert.Equal(entity.Id, indexed[0].Id);
+    }
+
+    [Fact]
+    public async Task DeleteEntityAsyncRemovesDeclaredIndexEntries()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(CreateModel()));
+        var entity = new ConsumerEvent
+        {
+            Id = Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            ConsumerId = "delete-index",
+            Payload = "value",
+        };
+
+        await entityStore.WriteEntityAsync(entity);
+        await entityStore.DeleteEntityAsync(entity, typeof(ConsumerEvent));
+
+        Assert.Empty(await entityStore.ReadEntitiesByIndexAsync<ConsumerEvent>("ConsumerId", "delete-index"));
+    }
+
+    [Fact]
     public async Task ReadEntityAsyncReturnsNullWhenRecordDoesNotExist()
     {
         var root = NewTempDirectory();

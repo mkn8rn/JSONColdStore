@@ -11,6 +11,8 @@ internal static class JsonColdStorePayloadCodec
     private const byte CompressedFlag = 1;
     private const byte EncryptedFlag = 2;
     private const byte ChecksumFlag = 4;
+    private const byte KeyedIntegrityFlag = 8;
+    private const byte KnownFlags = CompressedFlag | EncryptedFlag | ChecksumFlag | KeyedIntegrityFlag;
     private const byte CompressionNone = 0;
     private const byte CompressionBrotli = 1;
     private const byte EncryptionNone = 0;
@@ -61,8 +63,10 @@ internal static class JsonColdStorePayloadCodec
         var checksum = Array.Empty<byte>();
         if (options.Integrity.EnableChecksums)
         {
-            checksum = SHA256.HashData(payload);
+            checksum = ComputeIntegrityTag(payload, options.Integrity.Key);
             flags |= ChecksumFlag;
+            if (options.Integrity.Key is not null)
+                flags |= KeyedIntegrityFlag;
         }
 
         return WriteEnvelope(flags, compression, encryption, keyIdBytes, nonce, tag, checksum, payload);
@@ -85,7 +89,9 @@ internal static class JsonColdStorePayloadCodec
             if (!envelope.HasChecksum)
                 throw new InvalidDataException("The payload does not contain a checksum.");
 
-            var actualChecksum = SHA256.HashData(payload);
+            var actualChecksum = envelope.HasKeyedIntegrity
+                ? ComputeRequiredIntegrityTag(payload, options.Integrity.Key)
+                : SHA256.HashData(payload);
             if (!CryptographicOperations.FixedTimeEquals(actualChecksum, envelope.Checksum.Span))
                 throw new InvalidDataException("The payload checksum is invalid.");
         }
@@ -155,6 +161,34 @@ internal static class JsonColdStorePayloadCodec
         {
             CryptographicOperations.ZeroMemory(keyBytes);
         }
+    }
+
+    private static byte[] ComputeIntegrityTag(
+        ReadOnlySpan<byte> payload,
+        JsonColdStoreIntegrityKey? key)
+    {
+        if (key is null)
+            return SHA256.HashData(payload);
+
+        var keyBytes = key.CopyBytes();
+        try
+        {
+            return HMACSHA256.HashData(keyBytes, payload);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keyBytes);
+        }
+    }
+
+    private static byte[] ComputeRequiredIntegrityTag(
+        ReadOnlySpan<byte> payload,
+        JsonColdStoreIntegrityKey? key)
+    {
+        if (key is null)
+            throw new InvalidOperationException("An integrity key is required to verify this payload.");
+
+        return ComputeIntegrityTag(payload, key);
     }
 
     private static byte[] Decrypt(
@@ -240,6 +274,8 @@ internal static class JsonColdStorePayloadCodec
 
         if (payloadLength < 0)
             throw new InvalidDataException("Envelope payload length cannot be negative.");
+        if ((flags & ~KnownFlags) != 0)
+            throw new InvalidDataException("Unsupported payload envelope flags.");
 
         var expectedLength = HeaderLength + keyIdLength + nonceLength + tagLength + checksumLength + payloadLength;
         if (encoded.Length != expectedLength)
@@ -248,6 +284,7 @@ internal static class JsonColdStorePayloadCodec
         var compressed = (flags & CompressedFlag) != 0;
         var encrypted = (flags & EncryptedFlag) != 0;
         var hasChecksum = (flags & ChecksumFlag) != 0;
+        var hasKeyedIntegrity = (flags & KeyedIntegrityFlag) != 0;
         if (compressed && compression != CompressionBrotli)
             throw new InvalidDataException("Unsupported compression algorithm.");
         if (!compressed && compression != CompressionNone)
@@ -262,6 +299,8 @@ internal static class JsonColdStorePayloadCodec
             throw new InvalidDataException("Payload checksum metadata is invalid.");
         if (!hasChecksum && checksumLength != 0)
             throw new InvalidDataException("Payload checksum metadata is inconsistent.");
+        if (hasKeyedIntegrity && !hasChecksum)
+            throw new InvalidDataException("Keyed integrity metadata requires a checksum.");
 
         var cursor = HeaderLength;
         var keyId = Encoding.UTF8.GetString(encoded.Slice(cursor, keyIdLength));
@@ -274,13 +313,23 @@ internal static class JsonColdStorePayloadCodec
         cursor += checksumLength;
         var payload = encoded.Slice(cursor, payloadLength).ToArray();
 
-        return new Envelope(compressed, encrypted, hasChecksum, keyId, nonce, tag, checksum, payload);
+        return new Envelope(
+            compressed,
+            encrypted,
+            hasChecksum,
+            hasKeyedIntegrity,
+            keyId,
+            nonce,
+            tag,
+            checksum,
+            payload);
     }
 
     private sealed record Envelope(
         bool Compressed,
         bool Encrypted,
         bool HasChecksum,
+        bool HasKeyedIntegrity,
         string KeyId,
         ReadOnlyMemory<byte> Nonce,
         ReadOnlyMemory<byte> Tag,

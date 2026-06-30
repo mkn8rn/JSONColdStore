@@ -16,6 +16,7 @@ public sealed class JsonColdStoreOptionsBuilderTests
         Assert.False(options.AsyncFlush.Enabled);
         Assert.Equal(256, options.AsyncFlush.QueueCapacity);
         Assert.True(options.Integrity.EnableChecksums);
+        Assert.Null(options.Integrity.Key);
         Assert.True(options.Integrity.VerifyOnStartup);
         Assert.False(options.Integrity.VerifyOnRead);
         Assert.Equal(3, options.ReadRetry.MaxRetries);
@@ -26,6 +27,7 @@ public sealed class JsonColdStoreOptionsBuilderTests
     public void BuildAppliesAdvancedPolicies()
     {
         using var key = JsonColdStoreEncryptionKey.FromBytes(new byte[32]);
+        using var integrityKey = JsonColdStoreIntegrityKey.FromBytes(Enumerable.Repeat((byte)9, 32).ToArray());
 
         var options = new JsonColdStoreOptionsBuilder(TestDirectory("store"))
             .UseCompression(JsonColdStoreCompression.Brotli)
@@ -40,6 +42,7 @@ public sealed class JsonColdStoreOptionsBuilderTests
             .UseTransactionReplay(maxRetries: 7)
             .UseReadRetry(maxRetries: 4, baseDelay: TimeSpan.FromMilliseconds(10))
             .UseChecksums(verifyOnStartup: false, verifyOnRead: true)
+            .UseIntegrityKey(integrityKey)
             .UseQuarantine(TimeSpan.FromDays(9))
             .UseIndexMaintenance(TimeSpan.Zero, rebuildOnCatalogMismatch: false)
             .UseEventLog(enabled: true, retention: TimeSpan.FromDays(3))
@@ -56,6 +59,7 @@ public sealed class JsonColdStoreOptionsBuilderTests
         Assert.Equal(7, options.TransactionReplay.MaxRetries);
         Assert.Equal(4, options.ReadRetry.MaxRetries);
         Assert.Equal(TimeSpan.FromMilliseconds(10), options.ReadRetry.BaseDelay);
+        Assert.Same(integrityKey, options.Integrity.Key);
         Assert.False(options.Integrity.VerifyOnStartup);
         Assert.True(options.Integrity.VerifyOnRead);
         Assert.Equal(TimeSpan.FromDays(9), options.Quarantine.Retention);
@@ -73,6 +77,20 @@ public sealed class JsonColdStoreOptionsBuilderTests
         Assert.Throws<NotSupportedException>(() => builder.UseAsyncFlush());
         Assert.Throws<NotSupportedException>(
             () => builder.UseFlushRetry(1, TimeSpan.FromMilliseconds(1)));
+    }
+
+    [Fact]
+    public void DisableChecksumsClearsIntegrityKey()
+    {
+        using var integrityKey = JsonColdStoreIntegrityKey.FromBytes(new byte[32]);
+
+        var options = new JsonColdStoreOptionsBuilder(TestDirectory("store"))
+            .UseIntegrityKey(integrityKey)
+            .DisableChecksums()
+            .Build();
+
+        Assert.False(options.Integrity.EnableChecksums);
+        Assert.Null(options.Integrity.Key);
     }
 
     [Fact]

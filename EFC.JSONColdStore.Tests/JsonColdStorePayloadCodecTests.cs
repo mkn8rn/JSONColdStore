@@ -148,6 +148,68 @@ public sealed class JsonColdStorePayloadCodecTests
             () => JsonColdStorePayloadCodec.Decode(encoded, readOptions));
     }
 
+    [Fact]
+    public void KeyedIntegrityPayloadRoundTripsWithMatchingKey()
+    {
+        using var integrityKey = JsonColdStoreIntegrityKey.FromBytes(
+            Enumerable.Range(0, 32).Select(i => (byte)(i + 1)).ToArray());
+        var options = new JsonColdStoreOptionsBuilder(TestDirectory("integrity-keyed"))
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseChecksums(verifyOnStartup: true, verifyOnRead: true)
+            .UseIntegrityKey(integrityKey)
+            .Build();
+        var payload = "authenticated payload"u8.ToArray();
+
+        var encoded = JsonColdStorePayloadCodec.Encode(payload, options);
+        var decoded = JsonColdStorePayloadCodec.Decode(encoded, options);
+
+        Assert.Equal(payload, decoded);
+    }
+
+    [Fact]
+    public void KeyedIntegrityPayloadRequiresIntegrityKeyForVerification()
+    {
+        using var integrityKey = JsonColdStoreIntegrityKey.FromBytes(new byte[32]);
+        var writeOptions = new JsonColdStoreOptionsBuilder(TestDirectory("integrity-key-required"))
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseChecksums(verifyOnStartup: true, verifyOnRead: true)
+            .UseIntegrityKey(integrityKey)
+            .Build();
+        var readOptions = new JsonColdStoreOptionsBuilder(TestDirectory("integrity-key-required"))
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseChecksums(verifyOnStartup: true, verifyOnRead: true)
+            .Build();
+
+        var encoded = JsonColdStorePayloadCodec.Encode("keyed"u8, writeOptions);
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => JsonColdStorePayloadCodec.Decode(encoded, readOptions));
+
+        Assert.Contains("integrity key", exception.Message);
+    }
+
+    [Fact]
+    public void KeyedIntegrityPayloadRejectsWrongIntegrityKey()
+    {
+        using var correctKey = JsonColdStoreIntegrityKey.FromBytes(new byte[32]);
+        using var wrongKey = JsonColdStoreIntegrityKey.FromBytes(Enumerable.Repeat((byte)8, 32).ToArray());
+        var writeOptions = new JsonColdStoreOptionsBuilder(TestDirectory("integrity-wrong-key"))
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseChecksums(verifyOnStartup: true, verifyOnRead: true)
+            .UseIntegrityKey(correctKey)
+            .Build();
+        var readOptions = new JsonColdStoreOptionsBuilder(TestDirectory("integrity-wrong-key"))
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseChecksums(verifyOnStartup: true, verifyOnRead: true)
+            .UseIntegrityKey(wrongKey)
+            .Build();
+
+        var encoded = JsonColdStorePayloadCodec.Encode("keyed"u8, writeOptions);
+
+        Assert.Throws<InvalidDataException>(
+            () => JsonColdStorePayloadCodec.Decode(encoded, readOptions));
+    }
+
     private static string TestDirectory(string name) =>
         Path.Combine(Path.GetTempPath(), "jsoncoldstore-codec-tests", name);
 }

@@ -114,6 +114,9 @@ public sealed record JsonColdStoreIntegrityOptions
     /// <summary>Whether checksum manifests are maintained.</summary>
     public bool EnableChecksums { get; init; } = true;
 
+    /// <summary>Optional host-forwarded key used for HMAC-SHA256 payload tags.</summary>
+    public JsonColdStoreIntegrityKey? Key { get; init; }
+
     /// <summary>Whether checksums are verified during startup hydration.</summary>
     public bool VerifyOnStartup { get; init; } = true;
 

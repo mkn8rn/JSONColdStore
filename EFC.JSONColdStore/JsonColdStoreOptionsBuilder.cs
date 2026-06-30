@@ -117,8 +117,21 @@ public sealed class JsonColdStoreOptionsBuilder
         _integrity = new JsonColdStoreIntegrityOptions
         {
             EnableChecksums = true,
+            Key = _integrity.Key,
             VerifyOnStartup = verifyOnStartup,
             VerifyOnRead = verifyOnRead,
+        };
+        return this;
+    }
+
+    /// <summary>Enables keyed HMAC-SHA256 payload integrity with a host-forwarded key.</summary>
+    public JsonColdStoreOptionsBuilder UseIntegrityKey(JsonColdStoreIntegrityKey key)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        _integrity = _integrity with
+        {
+            EnableChecksums = true,
+            Key = key,
         };
         return this;
     }
@@ -129,6 +142,7 @@ public sealed class JsonColdStoreOptionsBuilder
         _integrity = _integrity with
         {
             EnableChecksums = false,
+            Key = null,
             VerifyOnStartup = false,
             VerifyOnRead = false,
         };

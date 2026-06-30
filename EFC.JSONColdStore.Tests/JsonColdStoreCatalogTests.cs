@@ -116,6 +116,91 @@ public sealed class JsonColdStoreCatalogTests
     }
 
     [Fact]
+    public async Task LoadAndValidateAsyncRejectsEmptyStoreId()
+    {
+        var root = NewTempDirectory();
+        var metadata = JsonColdStoreStoreMetadata.CreateNew(
+            new JsonColdStoreOptionsBuilder(root).Build(),
+            providerVersion: "test") with
+        {
+            StoreId = Guid.Empty,
+        };
+        await WriteMetadataAsync(root, metadata);
+        var catalog = new JsonColdStoreCatalog(
+            new JsonColdStoreOptionsBuilder(root).UseFsyncOnWrite(false).Build());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => catalog.LoadAndValidateAsync());
+
+        Assert.Contains("store id", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LoadAndValidateAsyncRejectsMissingProviderVersion()
+    {
+        var root = NewTempDirectory();
+        var metadata = JsonColdStoreStoreMetadata.CreateNew(
+            new JsonColdStoreOptionsBuilder(root).Build(),
+            providerVersion: "test") with
+        {
+            ProviderVersion = " ",
+        };
+        await WriteMetadataAsync(root, metadata);
+        var catalog = new JsonColdStoreCatalog(
+            new JsonColdStoreOptionsBuilder(root).UseFsyncOnWrite(false).Build());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => catalog.LoadAndValidateAsync());
+
+        Assert.Contains("provider version", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LoadAndValidateAsyncRejectsMissingCreationTimestamp()
+    {
+        var root = NewTempDirectory();
+        var metadata = JsonColdStoreStoreMetadata.CreateNew(
+            new JsonColdStoreOptionsBuilder(root).Build(),
+            providerVersion: "test") with
+        {
+            CreatedAt = default,
+        };
+        await WriteMetadataAsync(root, metadata);
+        var catalog = new JsonColdStoreCatalog(
+            new JsonColdStoreOptionsBuilder(root).UseFsyncOnWrite(false).Build());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => catalog.LoadAndValidateAsync());
+
+        Assert.Contains("creation timestamp", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LoadAndValidateAsyncRejectsUndefinedPolicyValues()
+    {
+        var root = NewTempDirectory();
+        var metadata = JsonColdStoreStoreMetadata.CreateNew(
+            new JsonColdStoreOptionsBuilder(root).Build(),
+            providerVersion: "test") with
+        {
+            Policy = new JsonColdStoreStorePolicySnapshot
+            {
+                Compression = (JsonColdStoreCompression)999,
+                StartupMode = JsonColdStoreStartupMode.MetadataOnly,
+                FullScanPolicy = JsonColdStoreScanPolicy.FailUnlessExplicit,
+            },
+        };
+        await WriteMetadataAsync(root, metadata);
+        var catalog = new JsonColdStoreCatalog(
+            new JsonColdStoreOptionsBuilder(root).UseFsyncOnWrite(false).Build());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => catalog.LoadAndValidateAsync());
+
+        Assert.Contains("compression", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task MetadataDoesNotPersistEncryptionKeyDetails()
     {
         var root = NewTempDirectory();

@@ -78,11 +78,25 @@ internal sealed class JsonColdStoreCatalog
 
     private void Validate(JsonColdStoreStoreMetadata metadata)
     {
+        if (metadata.StoreId == Guid.Empty)
+            throw new InvalidDataException("The JSONColdStore metadata store id is invalid.");
+
         if (metadata.FormatVersion != CurrentFormatVersion)
         {
             throw new NotSupportedException(
                 $"JSONColdStore format version {metadata.FormatVersion} is not supported.");
         }
+
+        if (metadata.CreatedAt == default)
+            throw new InvalidDataException("The JSONColdStore metadata creation timestamp is invalid.");
+
+        if (string.IsNullOrWhiteSpace(metadata.ProviderVersion))
+            throw new InvalidDataException("The JSONColdStore metadata provider version is required.");
+
+        if (metadata.Policy is null)
+            throw new InvalidDataException("The JSONColdStore metadata policy is required.");
+
+        ValidatePolicy(metadata.Policy);
 
         if (metadata.Policy.EncryptionEnabled && _options.Encryption is null)
         {
@@ -95,6 +109,16 @@ internal sealed class JsonColdStoreCatalog
             throw new InvalidOperationException(
                 "The configured encryption policy requires an encrypted JSONColdStore database.");
         }
+    }
+
+    private static void ValidatePolicy(JsonColdStoreStorePolicySnapshot policy)
+    {
+        if (!Enum.IsDefined(policy.Compression))
+            throw new InvalidDataException("The JSONColdStore metadata compression policy is invalid.");
+        if (!Enum.IsDefined(policy.StartupMode))
+            throw new InvalidDataException("The JSONColdStore metadata startup policy is invalid.");
+        if (!Enum.IsDefined(policy.FullScanPolicy))
+            throw new InvalidDataException("The JSONColdStore metadata full-scan policy is invalid.");
     }
 
     private string GetStoreFilePath() =>

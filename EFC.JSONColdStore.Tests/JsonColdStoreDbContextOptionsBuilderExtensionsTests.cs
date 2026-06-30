@@ -101,6 +101,64 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public void CanConnectReturnsTrueForCurrentStoreMetadata()
+    {
+        var directory = TestDirectory("can-connect-current-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        context.Database.EnsureCreated();
+
+        Assert.True(context.Database.CanConnect());
+    }
+
+    [Fact]
+    public async Task CanConnectReturnsTrueForLegacyEntityDirectory()
+    {
+        var directory = TestDirectory("can-connect-legacy-" + Guid.NewGuid().ToString("N"));
+        await WriteLegacyEntityAsync(
+            directory,
+            new WritableEntity
+            {
+                Id = Guid.Parse("62000000-0000-0000-0000-000000000001"),
+                Value = "legacy-connect",
+            });
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        Assert.True(context.Database.CanConnect());
+        Assert.True(await context.Database.CanConnectAsync());
+    }
+
+    [Fact]
+    public void CanConnectReturnsFalseForUnrelatedDirectory()
+    {
+        var directory = TestDirectory("can-connect-unrelated-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "unrelated.txt"), "not a store");
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        Assert.False(context.Database.CanConnect());
+    }
+
+    [Fact]
+    public void CanConnectReturnsFalseForInvalidStoreMetadata()
+    {
+        var directory = TestDirectory("can-connect-invalid-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "_store.json"), "not json");
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        Assert.False(context.Database.CanConnect());
+    }
+
+    [Fact]
     public void EnsureCreatedCreatesRootAndModelMetadataOnce()
     {
         var directory = TestDirectory("ensure-created-" + Guid.NewGuid().ToString("N"));

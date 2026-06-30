@@ -1,3 +1,4 @@
+using System.Text.Json;
 using EFC.JSONColdStore.Storage;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -110,12 +111,59 @@ internal sealed class JsonColdStoreDatabaseCreator : IDatabaseCreator
         return !existed;
     }
 
-    public bool CanConnect() =>
-        Directory.Exists(_options.DatabaseDirectory);
+    public bool CanConnect()
+    {
+        var databaseDirectory = JsonColdStorePathValidator.GetSafeChildPath(_options.DatabaseDirectory);
+        if (!Directory.Exists(databaseDirectory))
+            return false;
+
+        var storeFilePath = JsonColdStorePathValidator.GetSafeChildPath(
+            _options.DatabaseDirectory,
+            JsonColdStoreCatalog.StoreFileName);
+        if (File.Exists(storeFilePath))
+            return CanLoadStoreMetadata();
+
+        var modelDescriptor = JsonColdStoreModelDescriptor.Create(_currentDbContext.Context.Model);
+        return modelDescriptor.Entities.Any(HasLegacyRecords);
+    }
 
     public Task<bool> CanConnectAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(CanConnect());
     }
+
+    private bool CanLoadStoreMetadata()
+    {
+        try
+        {
+            var catalog = new JsonColdStoreCatalog(_options);
+            catalog.LoadAndValidateAsync()
+                .GetAwaiter()
+                .GetResult();
+            return true;
+        }
+        catch (Exception ex) when (IsConnectionProbeFailure(ex))
+        {
+            return false;
+        }
+    }
+
+    private bool HasLegacyRecords(JsonColdStoreEntityDescriptor descriptor)
+    {
+        var legacyDirectory = JsonColdStorePathValidator.GetSafeChildPath(
+            _options.DatabaseDirectory,
+            descriptor.ClrType.Name);
+        return Directory.Exists(legacyDirectory)
+            && Directory.EnumerateFiles(legacyDirectory, "*.json")
+                .Any(path => !Path.GetFileName(path).StartsWith('_'));
+    }
+
+    private static bool IsConnectionProbeFailure(Exception exception) =>
+        exception is IOException
+            or UnauthorizedAccessException
+            or JsonException
+            or InvalidDataException
+            or NotSupportedException
+            or InvalidOperationException;
 }

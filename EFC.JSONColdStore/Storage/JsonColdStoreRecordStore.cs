@@ -428,6 +428,29 @@ internal sealed class JsonColdStoreRecordStore
             + "-"
             + Path.GetFileName(recordPath);
         File.Move(recordPath, Path.Combine(quarantineDirectory, quarantineFileName), overwrite: false);
+        PruneExpiredQuarantineFiles(quarantineDirectory);
+    }
+
+    private void PruneExpiredQuarantineFiles(string quarantineDirectory)
+    {
+        if (_options.Quarantine.Retention < TimeSpan.Zero)
+            return;
+
+        var cutoff = DateTimeOffset.UtcNow.Subtract(_options.Quarantine.Retention).UtcDateTime;
+        foreach (var file in Directory.EnumerateFiles(quarantineDirectory, "*.jcs"))
+        {
+            try
+            {
+                if (File.GetLastWriteTimeUtc(file) < cutoff)
+                    File.Delete(file);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
     }
 }
 

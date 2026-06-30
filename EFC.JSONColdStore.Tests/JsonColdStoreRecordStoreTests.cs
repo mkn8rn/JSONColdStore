@@ -191,6 +191,36 @@ public sealed class JsonColdStoreRecordStoreTests
     }
 
     [Fact]
+    public async Task ReadRecordAsyncPrunesExpiredQuarantineFiles()
+    {
+        var root = NewTempDirectory();
+        var quarantineDirectory = Path.Combine(root, "_quarantine", "records");
+        Directory.CreateDirectory(quarantineDirectory);
+        var expiredFile = Path.Combine(quarantineDirectory, "expired.jcs");
+        await File.WriteAllTextAsync(expiredFile, "old quarantine");
+        File.SetLastWriteTimeUtc(expiredFile, DateTime.UtcNow.Subtract(TimeSpan.FromDays(2)));
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseChecksums(verifyOnStartup: true, verifyOnRead: true)
+            .UseQuarantine(TimeSpan.FromDays(1))
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+        await store.WriteRecordAsync("Entity", "1", """{"id":1}"""u8.ToArray());
+        var recordPath = JsonColdStorePathValidator.GetSafeChildPath(
+            root,
+            [.. JsonColdStoreRecordStore.GetRecordPathSegments("Entity", "1")]);
+        var bytes = await File.ReadAllBytesAsync(recordPath);
+        bytes[^1] ^= 0x7F;
+        await File.WriteAllBytesAsync(recordPath, bytes);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.ReadRecordAsync("Entity", "1"));
+
+        Assert.False(File.Exists(expiredFile));
+        Assert.Single(Directory.GetFiles(quarantineDirectory, "*.jcs"));
+    }
+
+    [Fact]
     public async Task ReadAllRecordsAsyncQuarantinesChecksumCorruptRecord()
     {
         var root = NewTempDirectory();

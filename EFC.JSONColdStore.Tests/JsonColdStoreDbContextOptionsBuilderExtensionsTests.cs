@@ -607,12 +607,16 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
 
         var result = await context.Database.RepairJsonColdStoreAsync();
         var valid = await context.Database.ReadJsonColdStoreAsync<WritableEntity>(validId);
+        var indexText = await File.ReadAllTextAsync(IndexPath(directory, "Value"));
 
         Assert.Equal(1, result.VerifiedRecords);
         Assert.Equal(1, result.QuarantinedRecords);
+        Assert.Equal(1, result.RebuiltIndexRecordCount);
         Assert.False(File.Exists(corruptRecordPath));
         Assert.NotNull(valid);
         Assert.Equal("keep me", valid.Value);
+        Assert.Contains(validId.ToString(), indexText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(corruptId.ToString(), indexText, StringComparison.OrdinalIgnoreCase);
         Assert.Single(Directory.GetFiles(Path.Combine(directory, "_quarantine", "records"), "*.jcs"));
     }
 

@@ -5,4 +5,5 @@ namespace EFC.JSONColdStore;
 /// </summary>
 public sealed record JsonColdStoreRepairResult(
     int VerifiedRecords,
-    int QuarantinedRecords);
+    int QuarantinedRecords,
+    int RebuiltIndexRecordCount = 0);

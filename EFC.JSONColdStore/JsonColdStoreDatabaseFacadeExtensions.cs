@@ -195,6 +195,7 @@ public static class JsonColdStoreDatabaseFacadeExtensions
     {
         ArgumentNullException.ThrowIfNull(database);
 
+        var context = database.GetService<ICurrentDbContext>().Context;
         var storeOptions = database.GetService<IDbContextOptions>()
             .FindExtension<JsonColdStoreOptionsExtension>()?.Options
             ?? throw new InvalidOperationException("JSONColdStore options are not configured.");
@@ -211,10 +212,18 @@ public static class JsonColdStoreDatabaseFacadeExtensions
             acquireWriterLock: true,
             cancellationToken);
 
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(context.Model));
         var result = await session.Records.RepairAllRecordsAsync(cancellationToken);
+        var rebuiltIndexRecordCount = result.QuarantinedRecords > 0
+            ? await entityStore.RebuildIndexesAsync(cancellationToken)
+            : 0;
+
         return new JsonColdStoreRepairResult(
             result.VerifiedRecords,
-            result.QuarantinedRecords);
+            result.QuarantinedRecords,
+            rebuiltIndexRecordCount);
     }
 
     /// <summary>

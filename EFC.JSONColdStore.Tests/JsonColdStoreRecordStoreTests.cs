@@ -37,6 +37,81 @@ public sealed class JsonColdStoreRecordStoreTests
     }
 
     [Fact]
+    public async Task WriteRecordAsyncDoesNotCreateEventLogWhenDisabled()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+
+        await store.WriteRecordAsync("Entity", "event-disabled", "payload"u8.ToArray());
+
+        Assert.False(Directory.Exists(Path.Combine(root, "_events")));
+    }
+
+    [Fact]
+    public async Task WriteRecordAsyncAppendsPlainEventLogWithoutRawRecordId()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseEventLog(enabled: true, TimeSpan.FromDays(7))
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+
+        await store.WriteRecordAsync("Entity", "raw-record-id", "payload"u8.ToArray());
+
+        var logText = await ReadOnlyEventLogTextAsync(root);
+        Assert.Contains("record.write", logText);
+        Assert.Contains("Entity", logText);
+        Assert.Contains("recordIdHash", logText);
+        Assert.DoesNotContain("raw-record-id", logText);
+    }
+
+    [Fact]
+    public async Task WriteRecordAsyncProtectsEncryptedEventLogDetails()
+    {
+        var root = NewTempDirectory();
+        using var key = JsonColdStoreEncryptionKey.FromBytes(new byte[32]);
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseEncryptionKey(key)
+            .UseEventLog(enabled: true, TimeSpan.FromDays(7))
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options, protectManifests: true);
+
+        await store.WriteRecordAsync("SecretEntity", "secret-record-id", "payload"u8.ToArray());
+
+        var logText = await ReadOnlyEventLogTextAsync(root);
+        Assert.Contains("\"protected\":true", logText);
+        Assert.DoesNotContain("record.write", logText);
+        Assert.DoesNotContain("SecretEntity", logText);
+        Assert.DoesNotContain("secret-record-id", logText);
+    }
+
+    [Fact]
+    public async Task WriteRecordAsyncPrunesExpiredEventLogs()
+    {
+        var root = NewTempDirectory();
+        var eventsDirectory = Path.Combine(root, "_events");
+        Directory.CreateDirectory(eventsDirectory);
+        var expiredLog = Path.Combine(eventsDirectory, "20000101.jsonl");
+        await File.WriteAllTextAsync(expiredLog, "expired");
+        File.SetLastWriteTimeUtc(expiredLog, DateTime.UtcNow.Subtract(TimeSpan.FromDays(2)));
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseEventLog(enabled: true, TimeSpan.FromDays(1))
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+
+        await store.WriteRecordAsync("Entity", "event-retention", "payload"u8.ToArray());
+
+        Assert.False(File.Exists(expiredLog));
+        Assert.NotEmpty(Directory.GetFiles(eventsDirectory, "*.jsonl"));
+    }
+
+    [Fact]
     public async Task EncodedNamesKeepUnsafeEntityAndRecordNamesInsideDatabaseDirectory()
     {
         var root = NewTempDirectory();
@@ -320,6 +395,13 @@ public sealed class JsonColdStoreRecordStoreTests
 
     private static string ManifestPath(string root, Guid manifestId) =>
         Path.Combine(root, "_transactions", "pending", manifestId.ToString("N") + ".json");
+
+    private static async Task<string> ReadOnlyEventLogTextAsync(string root)
+    {
+        var eventFiles = Directory.GetFiles(Path.Combine(root, "_events"), "*.jsonl");
+        var eventFile = Assert.Single(eventFiles);
+        return await File.ReadAllTextAsync(eventFile);
+    }
 
     private static string NewTempDirectory()
     {

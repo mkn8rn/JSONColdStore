@@ -15,11 +15,13 @@ internal sealed class JsonColdStoreRecordStore
 
     private readonly JsonColdStoreOptions _options;
     private readonly bool _protectManifests;
+    private readonly JsonColdStoreEventLog _eventLog;
 
     internal JsonColdStoreRecordStore(JsonColdStoreOptions options, bool protectManifests = false)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _protectManifests = protectManifests;
+        _eventLog = new JsonColdStoreEventLog(options, protectManifests);
     }
 
     internal async Task WriteRecordAsync(
@@ -51,6 +53,12 @@ internal sealed class JsonColdStoreRecordStore
                 cancellationToken);
 
             DeleteIfExists(manifestPath);
+            await _eventLog.AppendAsync(
+                "record.write",
+                entityName,
+                recordId,
+                manifest.ManifestId,
+                cancellationToken: cancellationToken);
         }
         catch
         {
@@ -83,6 +91,12 @@ internal sealed class JsonColdStoreRecordStore
             File.Delete(targetPath);
 
         DeleteIfExists(manifestPath);
+        await _eventLog.AppendAsync(
+            "record.delete",
+            entityName,
+            recordId,
+            manifest.ManifestId,
+            cancellationToken: cancellationToken);
     }
 
     internal async Task<byte[]> ReadRecordAsync(
@@ -212,11 +226,21 @@ internal sealed class JsonColdStoreRecordStore
                             return Task.CompletedTask;
                         },
                         cancellationToken);
+                    await _eventLog.AppendAsync(
+                        "manifest.recovered",
+                        manifestId: manifest.ManifestId,
+                        detail: "write",
+                        cancellationToken: cancellationToken);
                     completed++;
                     break;
 
                 case JsonColdStoreManifestOperation.Write:
                     await MoveManifestToFailedAsync(manifestPath, cancellationToken);
+                    await _eventLog.AppendAsync(
+                        "manifest.failed",
+                        manifestId: manifest.ManifestId,
+                        detail: "write-target-missing",
+                        cancellationToken: cancellationToken);
                     failed++;
                     break;
 
@@ -231,11 +255,21 @@ internal sealed class JsonColdStoreRecordStore
                             return Task.CompletedTask;
                         },
                         cancellationToken);
+                    await _eventLog.AppendAsync(
+                        "manifest.recovered",
+                        manifestId: manifest.ManifestId,
+                        detail: "delete",
+                        cancellationToken: cancellationToken);
                     completed++;
                     break;
 
                 default:
                     await MoveManifestToFailedAsync(manifestPath, cancellationToken);
+                    await _eventLog.AppendAsync(
+                        "manifest.failed",
+                        manifestId: manifest.ManifestId,
+                        detail: "unsupported-operation",
+                        cancellationToken: cancellationToken);
                     failed++;
                     break;
             }

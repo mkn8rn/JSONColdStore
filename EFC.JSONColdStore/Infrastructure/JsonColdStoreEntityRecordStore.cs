@@ -1,13 +1,20 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using EFC.JSONColdStore.Storage;
 
 namespace EFC.JSONColdStore.Infrastructure;
 
 internal sealed class JsonColdStoreEntityRecordStore
 {
-    private static readonly JsonSerializerOptions EntityJsonOptions = new()
+    private static readonly JsonSerializerOptions EntityWriteJsonOptions = new()
     {
         WriteIndented = false,
+    };
+
+    private static readonly JsonSerializerOptions EntityReadJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter(), new NullableGuidConverter() },
     };
 
     private readonly JsonColdStoreDatabaseSession _session;
@@ -51,7 +58,7 @@ internal sealed class JsonColdStoreEntityRecordStore
         var descriptor = _modelDescriptor.FindEntity(entityType);
         await EnsureModelCatalogAsync(createIfMissing: true, cancellationToken);
         var recordId = descriptor.CreateRecordIdFromEntity(entity);
-        var payload = JsonSerializer.SerializeToUtf8Bytes(entity, entityType, EntityJsonOptions);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(entity, entityType, EntityWriteJsonOptions);
 
         await _session.Records.WriteRecordAsync(
             descriptor.EntityName,
@@ -60,6 +67,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             cancellationToken);
 
         await UpsertIndexesAsync(descriptor, entity, recordId, cancellationToken);
+        _session.LegacyRecords.DeleteRecordIfExists(descriptor, recordId);
     }
 
     internal async Task<TEntity?> ReadEntityAsync<TEntity>(
@@ -70,15 +78,27 @@ internal sealed class JsonColdStoreEntityRecordStore
         var descriptor = _modelDescriptor.FindEntity(typeof(TEntity));
         await EnsureModelCatalogAsync(createIfMissing: false, cancellationToken);
         var recordId = descriptor.CreateRecordId(keyValue);
-        if (!_session.Records.RecordExists(descriptor.EntityName, recordId))
+        byte[] payload;
+        if (_session.Records.RecordExists(descriptor.EntityName, recordId))
+        {
+            payload = await _session.Records.ReadRecordAsync(
+                descriptor.EntityName,
+                recordId,
+                cancellationToken);
+        }
+        else if (_session.LegacyRecords.RecordExists(descriptor, recordId))
+        {
+            payload = await _session.LegacyRecords.ReadRecordAsync(
+                descriptor,
+                recordId,
+                cancellationToken);
+        }
+        else
+        {
             return null;
+        }
 
-        var payload = await _session.Records.ReadRecordAsync(
-            descriptor.EntityName,
-            recordId,
-            cancellationToken);
-
-        return JsonSerializer.Deserialize<TEntity>(payload, EntityJsonOptions);
+        return JsonSerializer.Deserialize<TEntity>(payload, EntityReadJsonOptions);
     }
 
     internal async Task<IReadOnlyList<TEntity>> ReadEntitiesByIndexAsync<TEntity>(
@@ -97,6 +117,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             indexKey,
             cancellationToken);
         var results = new List<TEntity>();
+        var seenRecordIds = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var recordId in recordIds)
         {
@@ -108,10 +129,22 @@ internal sealed class JsonColdStoreEntityRecordStore
                 descriptor.EntityName,
                 recordId,
                 cancellationToken);
-            var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityJsonOptions);
+            var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityReadJsonOptions);
             if (entity is not null)
+            {
+                seenRecordIds.Add(recordId);
                 results.Add(entity);
+            }
         }
+
+        await AddLegacyIndexResultsAsync(
+            descriptor,
+            index,
+            indexKey,
+            indexValue,
+            seenRecordIds,
+            results,
+            cancellationToken);
 
         return results;
     }
@@ -122,11 +155,29 @@ internal sealed class JsonColdStoreEntityRecordStore
     {
         var descriptor = _modelDescriptor.FindEntity(typeof(TEntity));
         await EnsureModelCatalogAsync(createIfMissing: false, cancellationToken);
+        var seenRecordIds = new HashSet<string>(StringComparer.Ordinal);
         await foreach (var payload in _session.Records.ReadAllRecordsAsync(
             descriptor.EntityName,
             cancellationToken))
         {
-            var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityJsonOptions);
+            var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityReadJsonOptions);
+            if (entity is not null)
+            {
+                seenRecordIds.Add(descriptor.CreateRecordIdFromEntity(entity));
+                yield return entity;
+            }
+        }
+
+        await foreach (var legacyRecord in _session.LegacyRecords.ReadAllRecordsAsync(
+            descriptor,
+            cancellationToken))
+        {
+            if (seenRecordIds.Contains(legacyRecord.RecordId))
+                continue;
+
+            var entity = JsonSerializer.Deserialize<TEntity>(
+                legacyRecord.Payload,
+                EntityReadJsonOptions);
             if (entity is not null)
                 yield return entity;
         }
@@ -195,6 +246,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             cancellationToken);
 
         await RemoveIndexesAsync(descriptor, recordId, cancellationToken);
+        _session.LegacyRecords.DeleteRecordIfExists(descriptor, recordId);
     }
 
     private async Task EnsureModelCatalogAsync(
@@ -237,6 +289,74 @@ internal sealed class JsonColdStoreEntityRecordStore
                 recordId,
                 cancellationToken);
         }
+    }
+
+    private async Task AddLegacyIndexResultsAsync<TEntity>(
+        JsonColdStoreEntityDescriptor descriptor,
+        JsonColdStoreIndexDescriptor index,
+        string indexKey,
+        object indexValue,
+        HashSet<string> seenRecordIds,
+        List<TEntity> results,
+        CancellationToken cancellationToken)
+        where TEntity : class
+    {
+        var lookup = await _session.LegacyRecords.LookupIndexAsync(
+            descriptor,
+            index,
+            indexKey,
+            indexValue,
+            cancellationToken);
+
+        if (lookup.UseIndex)
+        {
+            foreach (var recordId in lookup.RecordIds)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!seenRecordIds.Add(recordId))
+                    continue;
+                if (!_session.LegacyRecords.RecordExists(descriptor, recordId))
+                    continue;
+
+                var payload = await _session.LegacyRecords.ReadRecordAsync(
+                    descriptor,
+                    recordId,
+                    cancellationToken);
+                var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityReadJsonOptions);
+                if (entity is not null)
+                    results.Add(entity);
+            }
+
+            return;
+        }
+
+        await foreach (var legacyRecord in _session.LegacyRecords.ReadAllRecordsAsync(
+            descriptor,
+            cancellationToken))
+        {
+            if (!seenRecordIds.Add(legacyRecord.RecordId))
+                continue;
+
+            var entity = JsonSerializer.Deserialize<TEntity>(
+                legacyRecord.Payload,
+                EntityReadJsonOptions);
+            if (entity is not null && string.Equals(
+                    index.CreateIndexKeyFromEntity(entity),
+                    indexKey,
+                    StringComparison.Ordinal))
+            {
+                results.Add(entity);
+            }
+        }
+    }
+
+    private sealed class NullableGuidConverter : JsonConverter<Guid>
+    {
+        public override Guid Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+            reader.TokenType == JsonTokenType.Null ? Guid.Empty : reader.GetGuid();
+
+        public override void Write(Utf8JsonWriter writer, Guid value, JsonSerializerOptions options) =>
+            writer.WriteStringValue(value);
     }
 
     private async Task RemoveIndexesAsync(

@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using EFC.JSONColdStore;
 using EFC.JSONColdStore.Infrastructure;
 using EFC.JSONColdStore.Storage;
@@ -386,6 +389,115 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task ReadJsonColdStoreAsyncReadsLegacyPlainEntityWithoutCreatingMetadata()
+    {
+        var directory = TestDirectory("legacy-plain-" + Guid.NewGuid().ToString("N"));
+        var id = Guid.Parse("70000000-0000-0000-0000-000000000001");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = id,
+            Value = "plain legacy",
+        });
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var read = await context.Database.ReadJsonColdStoreAsync<WritableEntity>(id);
+
+        Assert.NotNull(read);
+        Assert.Equal("plain legacy", read.Value);
+        Assert.False(File.Exists(Path.Combine(directory, "_store.json")));
+        Assert.False(File.Exists(Path.Combine(directory, "_model.json")));
+    }
+
+    [Fact]
+    public async Task ReadJsonColdStoreAsyncReadsLegacyEncryptedEntityWithConfiguredKey()
+    {
+        var directory = TestDirectory("legacy-encrypted-" + Guid.NewGuid().ToString("N"));
+        using var key = JsonColdStoreEncryptionKey.FromBytes(Enumerable.Range(0, 32).Select(value => (byte)value).ToArray());
+        var id = Guid.Parse("70000000-0000-0000-0000-000000000002");
+        await WriteLegacyEntityAsync(
+            directory,
+            new WritableEntity
+            {
+                Id = id,
+                Value = "encrypted legacy",
+            },
+            key);
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseEncryptionKey(key));
+
+        using var context = new WritableDbContext(builder.Options);
+        var read = await context.Database.ReadJsonColdStoreAsync<WritableEntity>(id);
+
+        Assert.NotNull(read);
+        Assert.Equal("encrypted legacy", read.Value);
+    }
+
+    [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncUsesLegacyIndexShard()
+    {
+        var directory = TestDirectory("legacy-index-" + Guid.NewGuid().ToString("N"));
+        var matchId = Guid.Parse("70000000-0000-0000-0000-000000000003");
+        var skipId = Guid.Parse("70000000-0000-0000-0000-000000000004");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = matchId,
+            Value = "legacy-match",
+        });
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = skipId,
+            Value = "legacy-skip",
+        });
+        await WriteLegacyIndexAsync(directory, "Value", "legacy-match", [matchId.ToString()]);
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var matches = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            "Value",
+            "legacy-match");
+
+        Assert.Single(matches);
+        Assert.Equal(matchId, matches[0].Id);
+    }
+
+    [Fact]
+    public async Task SaveChangesRetiresSameKeyLegacyRecordAfterNewFormatWrite()
+    {
+        var directory = TestDirectory("legacy-retire-" + Guid.NewGuid().ToString("N"));
+        var id = Guid.Parse("70000000-0000-0000-0000-000000000005");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = id,
+            Value = "old",
+        });
+        await WriteLegacyIndexAsync(directory, "Value", "old", [id.ToString()]);
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.Update(new WritableEntity
+        {
+            Id = id,
+            Value = "new",
+        });
+        Assert.Equal(1, context.SaveChanges());
+
+        Assert.False(File.Exists(Path.Combine(directory, nameof(WritableEntity), $"{id}.json")));
+        var read = await context.Database.ReadJsonColdStoreAsync<WritableEntity>(id);
+        var staleIndexResults = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>("Value", "old");
+        Assert.NotNull(read);
+        Assert.Equal("new", read.Value);
+        Assert.Empty(staleIndexResults);
+    }
+
+    [Fact]
     public void QueryThrowsClearUnsupportedMessageUntilQueryPipelineExists()
     {
         var directory = TestDirectory("query-unsupported-" + Guid.NewGuid().ToString("N"));
@@ -400,6 +512,64 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
 
     private static string TestDirectory(string name) =>
         Path.Combine(Path.GetTempPath(), "jsoncoldstore-tests", name);
+
+    private static async Task WriteLegacyEntityAsync(
+        string directory,
+        WritableEntity entity,
+        JsonColdStoreEncryptionKey? key = null)
+    {
+        var entityDirectory = Path.Combine(directory, nameof(WritableEntity));
+        Directory.CreateDirectory(entityDirectory);
+        var json = JsonSerializer.Serialize(
+            entity,
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        var bytes = Encoding.UTF8.GetBytes(json);
+        if (key is not null)
+            bytes = EncryptLegacyPayload(bytes, key);
+
+        await File.WriteAllBytesAsync(Path.Combine(entityDirectory, $"{entity.Id}.json"), bytes);
+    }
+
+    private static async Task WriteLegacyIndexAsync(
+        string directory,
+        string propertyName,
+        string indexKey,
+        IEnumerable<string> recordIds)
+    {
+        var entityDirectory = Path.Combine(directory, nameof(WritableEntity));
+        Directory.CreateDirectory(entityDirectory);
+        var shard = new Dictionary<string, List<string>>
+        {
+            [indexKey] = recordIds.ToList(),
+        };
+        await File.WriteAllTextAsync(
+            Path.Combine(entityDirectory, $"_index_{propertyName}.json"),
+            JsonSerializer.Serialize(shard, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static byte[] EncryptLegacyPayload(ReadOnlySpan<byte> plaintext, JsonColdStoreEncryptionKey key)
+    {
+        var keyBytes = key.CopyBytes();
+        try
+        {
+            var nonce = RandomNumberGenerator.GetBytes(12);
+            var ciphertext = new byte[plaintext.Length];
+            var tag = new byte[16];
+            using var aes = new AesGcm(keyBytes, 16);
+            aes.Encrypt(nonce, plaintext, ciphertext, tag);
+
+            var envelope = new byte[1 + nonce.Length + ciphertext.Length + tag.Length];
+            envelope[0] = 0x01;
+            nonce.CopyTo(envelope.AsSpan(1));
+            ciphertext.CopyTo(envelope.AsSpan(1 + nonce.Length));
+            tag.CopyTo(envelope.AsSpan(1 + nonce.Length + ciphertext.Length));
+            return envelope;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keyBytes);
+        }
+    }
 
     private sealed class TestDbContext(DbContextOptions<TestDbContext> options) : DbContext(options);
 

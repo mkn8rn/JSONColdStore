@@ -11,6 +11,7 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
         JsonColdStoreRecoveryResult recoveryResult,
         JsonColdStoreStartupValidationResult startupValidationResult,
         JsonColdStoreRecordStore records,
+        JsonColdStoreLegacyRecordStore legacyRecords,
         JsonColdStoreDatabaseLock? writerLock)
     {
         Options = options;
@@ -18,6 +19,7 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
         RecoveryResult = recoveryResult;
         StartupValidationResult = startupValidationResult;
         Records = records;
+        LegacyRecords = legacyRecords;
         _writerLock = writerLock;
     }
 
@@ -30,6 +32,8 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
     internal JsonColdStoreStartupValidationResult StartupValidationResult { get; }
 
     internal JsonColdStoreRecordStore Records { get; }
+
+    internal JsonColdStoreLegacyRecordStore LegacyRecords { get; }
 
     internal static async Task<JsonColdStoreDatabaseSession> OpenAsync(
         JsonColdStoreOptions options,
@@ -45,11 +49,14 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
                 writerLock = await JsonColdStoreDatabaseLock.AcquireAsync(options, cancellationToken);
 
             var catalog = new JsonColdStoreCatalog(options);
-            var metadata = await catalog.EnsureInitializedAsync(cancellationToken);
+            var metadata = acquireWriterLock
+                ? await catalog.EnsureInitializedAsync(cancellationToken)
+                : await catalog.LoadIfExistsOrCreateTransientAsync(cancellationToken);
             var records = new JsonColdStoreRecordStore(
                 options,
                 metadata.Policy.EncryptionEnabled,
                 allowStorageMutations: acquireWriterLock);
+            var legacyRecords = new JsonColdStoreLegacyRecordStore(options);
             var recoveryResult = acquireWriterLock
                 ? await records.RecoverPendingManifestsAsync(cancellationToken)
                 : new JsonColdStoreRecoveryResult(0, 0);
@@ -63,6 +70,7 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
                 recoveryResult,
                 startupValidationResult,
                 records,
+                legacyRecords,
                 writerLock);
         }
         catch

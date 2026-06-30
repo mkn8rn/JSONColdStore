@@ -36,6 +36,15 @@ internal sealed class JsonColdStoreCatalog
         return metadata;
     }
 
+    internal async Task<JsonColdStoreStoreMetadata> LoadIfExistsOrCreateTransientAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var storeFile = GetStoreFilePath();
+        return File.Exists(storeFile)
+            ? await LoadAndValidateAsync(cancellationToken)
+            : JsonColdStoreStoreMetadata.CreateNew(_options, JsonColdStoreProviderInfo.Version);
+    }
+
     internal async Task<JsonColdStoreStoreMetadata> LoadAndValidateAsync(
         CancellationToken cancellationToken = default)
     {

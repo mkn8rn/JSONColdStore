@@ -61,6 +61,22 @@ public sealed class JsonColdStoreDatabaseLockTests
         Assert.True(File.Exists(LockPath(root)));
     }
 
+    [Fact]
+    public async Task HeldLockAllowsRecursiveStoreDeletion()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+
+        using var databaseLock = await JsonColdStoreDatabaseLock.AcquireAsync(options);
+        await File.WriteAllTextAsync(Path.Combine(root, "payload.txt"), "payload");
+
+        Directory.Delete(root, recursive: true);
+
+        Assert.False(Directory.Exists(root));
+    }
+
     private static string LockPath(string root) =>
         Path.Combine(
             root,

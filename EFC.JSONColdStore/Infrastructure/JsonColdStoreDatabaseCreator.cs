@@ -63,14 +63,15 @@ internal sealed class JsonColdStoreDatabaseCreator : IDatabaseCreator
 
             var catalog = new JsonColdStoreCatalog(_options);
             await catalog.LoadAndValidateAsync(cancellationToken).ConfigureAwait(false);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            Directory.Delete(databaseDirectory, recursive: true);
         }
         finally
         {
             writerLock.Dispose();
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        Directory.Delete(databaseDirectory, recursive: true);
         return true;
     }
 

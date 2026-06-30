@@ -47,7 +47,7 @@ internal sealed class JsonColdStoreDatabaseLock : IDisposable
                 lockPath,
                 FileMode.OpenOrCreate,
                 FileAccess.ReadWrite,
-                FileShare.Read,
+                FileShare.Read | FileShare.Delete,
                 bufferSize: 4096,
                 FileOptions.Asynchronous);
         }

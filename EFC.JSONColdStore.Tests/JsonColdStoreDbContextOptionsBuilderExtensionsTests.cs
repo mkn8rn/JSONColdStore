@@ -498,7 +498,119 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
-    public void QueryThrowsClearUnsupportedMessageUntilQueryPipelineExists()
+    public void LinqSingleOrDefaultReadsByPrimaryKey()
+    {
+        var directory = TestDirectory("query-primary-key-" + Guid.NewGuid().ToString("N"));
+        var id = Guid.Parse("80000000-0000-0000-0000-000000000001");
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = id,
+                Value = "match",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("80000000-0000-0000-0000-000000000002"),
+                Value = "skip",
+            });
+        context.SaveChanges();
+
+        var read = context.Entities.SingleOrDefault(entity => entity.Id == id);
+
+        Assert.NotNull(read);
+        Assert.Equal("match", read.Value);
+    }
+
+    [Fact]
+    public void LinqWhereUsesDeclaredSinglePropertyIndex()
+    {
+        var directory = TestDirectory("query-index-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("80000000-0000-0000-0000-000000000003"),
+                Value = "match",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("80000000-0000-0000-0000-000000000004"),
+                Value = "skip",
+            });
+        context.SaveChanges();
+
+        var matches = context.Entities.Where(entity => entity.Value == "match").ToList();
+
+        Assert.Single(matches);
+        Assert.Equal("match", matches[0].Value);
+    }
+
+    [Fact]
+    public async Task LinqWhereUsesLegacyIndexShardWithoutCreatingMetadata()
+    {
+        var directory = TestDirectory("query-legacy-index-" + Guid.NewGuid().ToString("N"));
+        var id = Guid.Parse("80000000-0000-0000-0000-000000000007");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = id,
+            Value = "legacy-query",
+        });
+        await WriteLegacyIndexAsync(directory, "Value", "legacy-query", [id.ToString()]);
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var matches = context.Entities.Where(entity => entity.Value == "legacy-query").ToList();
+
+        Assert.Single(matches);
+        Assert.Equal(id, matches[0].Id);
+        Assert.False(File.Exists(Path.Combine(directory, "_store.json")));
+        Assert.False(File.Exists(Path.Combine(directory, "_model.json")));
+    }
+
+    [Fact]
+    public void LinqToListScansWhenSilentScansAreAllowed()
+    {
+        var directory = TestDirectory("query-silent-scan-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseFullScanPolicy(JsonColdStoreScanPolicy.AllowSilentScans));
+
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("80000000-0000-0000-0000-000000000005"),
+                Value = "first",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("80000000-0000-0000-0000-000000000006"),
+                Value = "second",
+            });
+        context.SaveChanges();
+
+        var values = context.Entities
+            .ToList()
+            .Select(entity => entity.Value)
+            .Order()
+            .ToArray();
+
+        Assert.Equal(["first", "second"], values);
+    }
+
+    [Fact]
+    public void LinqToListThrowsWhenFullScanWouldBeRequiredByDefault()
     {
         var directory = TestDirectory("query-unsupported-" + Guid.NewGuid().ToString("N"));
         var builder = new DbContextOptionsBuilder<WritableDbContext>();
@@ -507,7 +619,7 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
 
         var exception = Assert.Throws<NotSupportedException>(() => context.Entities.ToList());
 
-        Assert.Contains("LINQ query", exception.Message);
+        Assert.Contains("full scan", exception.Message);
     }
 
     private static string TestDirectory(string name) =>

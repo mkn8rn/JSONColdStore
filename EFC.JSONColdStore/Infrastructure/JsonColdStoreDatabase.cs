@@ -35,18 +35,26 @@ internal sealed class JsonColdStoreDatabase : IDatabase
     public Func<QueryContext, TResult> CompileQuery<TResult>(Expression query, bool async)
     {
         ArgumentNullException.ThrowIfNull(query);
-        return _ => throw Unsupported("LINQ query execution is not implemented yet.");
+        return queryContext => JsonColdStoreQueryExecutor.Execute<TResult>(
+            _options,
+            queryContext,
+            query,
+            async);
     }
 
     public Expression<Func<QueryContext, TResult>> CompileQueryExpression<TResult>(Expression query, bool async)
     {
         ArgumentNullException.ThrowIfNull(query);
 
-        var exception = Expression.New(
-            typeof(NotSupportedException).GetConstructor([typeof(string)])!,
-            Expression.Constant("LINQ query expression compilation is not implemented yet."));
-        var body = Expression.Throw(exception, typeof(TResult));
         var parameter = Expression.Parameter(typeof(QueryContext), "queryContext");
+        var body = Expression.Call(
+            typeof(JsonColdStoreQueryExecutor),
+            nameof(JsonColdStoreQueryExecutor.Execute),
+            [typeof(TResult)],
+            Expression.Constant(_options),
+            parameter,
+            Expression.Constant(query, typeof(Expression)),
+            Expression.Constant(async));
 
         return Expression.Lambda<Func<QueryContext, TResult>>(body, parameter);
     }

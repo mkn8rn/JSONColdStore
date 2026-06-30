@@ -1,6 +1,7 @@
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using EFC.JSONColdStore.Storage;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Query;
@@ -13,6 +14,14 @@ internal static class JsonColdStoreQueryExecutor
         typeof(JsonColdStoreQueryExecutor)
             .GetMethod(nameof(ExecuteTyped), BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("The JSONColdStore query executor is misconfigured.");
+    private static readonly MethodInfo ExecuteAsyncEnumerableMethod =
+        typeof(JsonColdStoreQueryExecutor)
+            .GetMethod(nameof(ExecuteAsyncEnumerable), BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("The JSONColdStore query executor is misconfigured.");
+    private static readonly MethodInfo ExecuteTaskMethod =
+        typeof(JsonColdStoreQueryExecutor)
+            .GetMethod(nameof(ExecuteTask), BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("The JSONColdStore query executor is misconfigured.");
 
     internal static TResult Execute<TResult>(
         JsonColdStoreOptions options,
@@ -24,13 +33,20 @@ internal static class JsonColdStoreQueryExecutor
         ArgumentNullException.ThrowIfNull(queryContext);
         ArgumentNullException.ThrowIfNull(query);
 
-        if (async)
-            throw Unsupported("Async LINQ query execution is not implemented yet.");
-
         var plan = JsonColdStoreQueryPlan.Create(query);
         var currentOptions = queryContext.Context.GetService<IDbContextOptions>()
             .FindExtension<JsonColdStoreOptionsExtension>()?.Options
             ?? options;
+
+        if (async)
+        {
+            var asyncResult = CreateAsyncResult<TResult>(
+                currentOptions,
+                queryContext,
+                plan);
+            return (TResult)asyncResult;
+        }
+
         try
         {
             var result = ExecuteTypedMethod
@@ -44,34 +60,127 @@ internal static class JsonColdStoreQueryExecutor
         }
     }
 
+    private static object CreateAsyncResult<TResult>(
+        JsonColdStoreOptions options,
+        QueryContext queryContext,
+        JsonColdStoreQueryPlan plan)
+    {
+        var resultType = typeof(TResult);
+        if (resultType.IsGenericType
+            && resultType.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
+        {
+            var entityType = resultType.GetGenericArguments()[0];
+            return ExecuteAsyncEnumerableMethod
+                .MakeGenericMethod(entityType)
+                .Invoke(null, [options, queryContext, plan, CancellationToken.None])!;
+        }
+
+        if (resultType.IsGenericType
+            && resultType.GetGenericTypeDefinition() == typeof(Task<>))
+        {
+            var terminalType = resultType.GetGenericArguments()[0];
+            return ExecuteTaskMethod
+                .MakeGenericMethod(plan.EntityType, terminalType)
+                .Invoke(null, [options, queryContext, plan])!;
+        }
+
+        throw Unsupported("The async LINQ query result shape is not supported.");
+    }
+
     private static object? ExecuteTyped<TEntity>(
         JsonColdStoreOptions options,
         QueryContext queryContext,
         JsonColdStoreQueryPlan plan)
         where TEntity : class
     {
-        using var session = JsonColdStoreDatabaseSession.OpenAsync(
+        var results = ExecuteSequenceAsync<TEntity>(
                 options,
-                acquireWriterLock: false)
+                queryContext,
+                plan,
+                queryContext.CancellationToken)
             .GetAwaiter()
             .GetResult();
+
+        return ApplyTerminal(results, plan.Terminal);
+    }
+
+    private static async IAsyncEnumerable<TEntity> ExecuteAsyncEnumerable<TEntity>(
+        JsonColdStoreOptions options,
+        QueryContext queryContext,
+        JsonColdStoreQueryPlan plan,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        where TEntity : class
+    {
+        var effectiveCancellationToken = cancellationToken.CanBeCanceled
+            ? cancellationToken
+            : queryContext.CancellationToken;
+        var results = await ExecuteSequenceAsync<TEntity>(
+                options,
+                queryContext,
+                plan,
+                effectiveCancellationToken)
+            .ConfigureAwait(false);
+
+        foreach (var entity in results)
+        {
+            effectiveCancellationToken.ThrowIfCancellationRequested();
+            yield return entity;
+        }
+    }
+
+    private static async Task<TTerminal> ExecuteTask<TEntity, TTerminal>(
+        JsonColdStoreOptions options,
+        QueryContext queryContext,
+        JsonColdStoreQueryPlan plan)
+        where TEntity : class
+    {
+        var results = await ExecuteSequenceAsync<TEntity>(
+                options,
+                queryContext,
+                plan,
+                queryContext.CancellationToken)
+            .ConfigureAwait(false);
+        var terminal = ApplyTerminal(results, plan.Terminal);
+        return (TTerminal)terminal!;
+    }
+
+    private static async Task<List<TEntity>> ExecuteSequenceAsync<TEntity>(
+        JsonColdStoreOptions options,
+        QueryContext queryContext,
+        JsonColdStoreQueryPlan plan,
+        CancellationToken cancellationToken)
+        where TEntity : class
+    {
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(
+                options,
+                acquireWriterLock: false,
+                cancellationToken)
+            .ConfigureAwait(false);
         var modelDescriptor = JsonColdStoreModelDescriptor.Create(queryContext.Context.Model);
         var entityStore = new JsonColdStoreEntityRecordStore(session, modelDescriptor);
         var entityDescriptor = modelDescriptor.FindEntity(typeof(TEntity));
-        var candidates = ReadCandidates<TEntity>(
-            options,
-            queryContext,
-            entityStore,
-            entityDescriptor,
-            plan);
+        var candidates = await ReadCandidatesAsync<TEntity>(
+                options,
+                queryContext,
+                entityStore,
+                entityDescriptor,
+                plan,
+                cancellationToken)
+            .ConfigureAwait(false);
         var predicates = plan.Filters
             .Select(filter => CreatePredicate<TEntity>(queryContext, filter))
             .ToArray();
-        var results = candidates
+
+        return candidates
             .Where(entity => predicates.All(predicate => predicate(entity)))
             .ToList();
+    }
 
-        return plan.Terminal switch
+    private static object? ApplyTerminal<TEntity>(
+        List<TEntity> results,
+        JsonColdStoreQueryTerminal terminal)
+    {
+        return terminal switch
         {
             JsonColdStoreQueryTerminal.Sequence => results,
             JsonColdStoreQueryTerminal.First => results.First(),
@@ -85,12 +194,13 @@ internal static class JsonColdStoreQueryExecutor
         };
     }
 
-    private static List<TEntity> ReadCandidates<TEntity>(
+    private static async Task<List<TEntity>> ReadCandidatesAsync<TEntity>(
         JsonColdStoreOptions options,
         QueryContext queryContext,
         JsonColdStoreEntityRecordStore entityStore,
         JsonColdStoreEntityDescriptor entityDescriptor,
-        JsonColdStoreQueryPlan plan)
+        JsonColdStoreQueryPlan plan,
+        CancellationToken cancellationToken)
         where TEntity : class
     {
         var seek = plan.Filters
@@ -101,16 +211,19 @@ internal static class JsonColdStoreQueryExecutor
         {
             if (string.Equals(seek.PropertyName, entityDescriptor.Key.PropertyName, StringComparison.Ordinal))
             {
-                var entity = entityStore.ReadEntityAsync<TEntity>(seek.Value!)
-                    .GetAwaiter()
-                    .GetResult();
+                var entity = await entityStore.ReadEntityAsync<TEntity>(
+                        seek.Value!,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 return entity is null ? [] : [entity];
             }
 
-            return entityStore.ReadEntitiesByIndexAsync<TEntity>(seek.PropertyName, seek.Value!)
-                .GetAwaiter()
-                .GetResult()
-                .ToList();
+            var indexed = await entityStore.ReadEntitiesByIndexAsync<TEntity>(
+                    seek.PropertyName,
+                    seek.Value!,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return indexed.ToList();
         }
 
         if (options.FullScanPolicy != JsonColdStoreScanPolicy.AllowSilentScans)
@@ -120,17 +233,8 @@ internal static class JsonColdStoreQueryExecutor
                 + "query by primary key, or allow silent scans for small stores.");
         }
 
-        return ScanAll<TEntity>(entityStore)
-            .GetAwaiter()
-            .GetResult();
-    }
-
-    private static async Task<List<TEntity>> ScanAll<TEntity>(
-        JsonColdStoreEntityRecordStore entityStore)
-        where TEntity : class
-    {
         var results = new List<TEntity>();
-        await foreach (var entity in entityStore.ScanEntitiesAsync<TEntity>())
+        await foreach (var entity in entityStore.ScanEntitiesAsync<TEntity>(cancellationToken))
             results.Add(entity);
 
         return results;

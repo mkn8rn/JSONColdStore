@@ -120,6 +120,50 @@ internal sealed class JsonColdStoreEntityRecordStore
         }
     }
 
+    internal async Task<int> RebuildIndexesAsync<TEntity>(
+        CancellationToken cancellationToken = default)
+        where TEntity : class
+    {
+        var descriptor = _modelDescriptor.FindEntity(typeof(TEntity));
+        var bucketsByIndex = descriptor.Indexes.ToDictionary(
+            index => index,
+            _ => new Dictionary<string, List<string>>(StringComparer.Ordinal));
+        var records = 0;
+
+        await foreach (var entity in ScanEntitiesAsync<TEntity>(cancellationToken))
+        {
+            records++;
+            var recordId = descriptor.CreateRecordIdFromEntity(entity);
+            foreach (var index in descriptor.Indexes)
+            {
+                var indexKey = index.CreateIndexKeyFromEntity(entity);
+                var buckets = bucketsByIndex[index];
+                if (!buckets.TryGetValue(indexKey, out var recordIds))
+                {
+                    recordIds = [];
+                    buckets[indexKey] = recordIds;
+                }
+
+                if (!recordIds.Contains(recordId, StringComparer.Ordinal))
+                    recordIds.Add(recordId);
+            }
+        }
+
+        foreach (var (index, buckets) in bucketsByIndex)
+        {
+            await _indexStore.ReplaceAsync(
+                descriptor.EntityName,
+                index.StorageName,
+                buckets.ToDictionary(
+                    pair => pair.Key,
+                    pair => (IReadOnlyList<string>)pair.Value,
+                    StringComparer.Ordinal),
+                cancellationToken);
+        }
+
+        return records;
+    }
+
     internal async Task DeleteEntityAsync(
         object entity,
         Type entityType,

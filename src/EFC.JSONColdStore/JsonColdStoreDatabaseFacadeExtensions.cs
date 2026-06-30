@@ -99,4 +99,30 @@ public static class JsonColdStoreDatabaseFacadeExtensions
             indexValue,
             cancellationToken);
     }
+
+    /// <summary>
+    /// Rebuilds declared JSONColdStore index files for one entity type from stored records.
+    /// </summary>
+    public static async Task<int> RebuildJsonColdStoreIndexesAsync<TEntity>(
+        this DatabaseFacade database,
+        CancellationToken cancellationToken = default)
+        where TEntity : class
+    {
+        ArgumentNullException.ThrowIfNull(database);
+
+        var context = database.GetService<ICurrentDbContext>().Context;
+        var storeOptions = database.GetService<IDbContextOptions>()
+            .FindExtension<JsonColdStoreOptionsExtension>()?.Options
+            ?? throw new InvalidOperationException("JSONColdStore options are not configured.");
+
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(
+            storeOptions,
+            acquireWriterLock: true,
+            cancellationToken);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(context.Model));
+
+        return await entityStore.RebuildIndexesAsync<TEntity>(cancellationToken);
+    }
 }

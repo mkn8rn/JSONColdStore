@@ -128,6 +128,39 @@ public sealed class JsonColdStoreEntityRecordStoreTests
     }
 
     [Fact]
+    public async Task RebuildIndexesAsyncRecreatesMissingIndexEntries()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(CreateModel()));
+        var entity = new ConsumerEvent
+        {
+            Id = Guid.Parse("35000000-0000-0000-0000-000000000001"),
+            ConsumerId = "rebuild",
+            Payload = "value",
+        };
+        await entityStore.WriteEntityAsync(entity);
+        Directory.Delete(Path.Combine(
+            root,
+            "entities",
+            JsonColdStoreNameEncoder.EncodePathSegment(typeof(ConsumerEvent).FullName!),
+            "indexes"), recursive: true);
+
+        Assert.Empty(await entityStore.ReadEntitiesByIndexAsync<ConsumerEvent>("ConsumerId", "rebuild"));
+        var rebuilt = await entityStore.RebuildIndexesAsync<ConsumerEvent>();
+
+        Assert.Equal(1, rebuilt);
+        var indexed = await entityStore.ReadEntitiesByIndexAsync<ConsumerEvent>("ConsumerId", "rebuild");
+        Assert.Single(indexed);
+        Assert.Equal(entity.Id, indexed[0].Id);
+    }
+
+    [Fact]
     public async Task ReadEntityAsyncReturnsNullWhenRecordDoesNotExist()
     {
         var root = NewTempDirectory();

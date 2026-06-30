@@ -57,6 +57,25 @@ internal sealed class JsonColdStoreIndexStore
         await WriteDocumentAsync(entityName, indexName, Normalize(document), cancellationToken);
     }
 
+    internal async Task ReplaceAsync(
+        string entityName,
+        string indexName,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> buckets,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(indexName))
+            throw new ArgumentException("An index name is required.", nameof(indexName));
+        ArgumentNullException.ThrowIfNull(buckets);
+
+        var document = new JsonColdStoreIndexDocument(
+            buckets.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value.ToList(),
+                StringComparer.Ordinal));
+
+        await WriteDocumentAsync(entityName, indexName, Normalize(document), cancellationToken);
+    }
+
     internal async Task<IReadOnlyList<string>> ReadRecordIdsAsync(
         string entityName,
         string indexName,
@@ -120,7 +139,7 @@ internal sealed class JsonColdStoreIndexStore
     private static JsonColdStoreIndexDocument Normalize(JsonColdStoreIndexDocument document)
     {
         var buckets = document.Buckets
-            .Where(pair => pair.Value.Count > 0)
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value.Count > 0)
             .OrderBy(pair => pair.Key, StringComparer.Ordinal)
             .ToDictionary(
                 pair => pair.Key,

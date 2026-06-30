@@ -303,6 +303,36 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task RebuildJsonColdStoreIndexesAsyncRepairsDeletedIndexFile()
+    {
+        var directory = TestDirectory("facade-index-rebuild-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.Add(new WritableEntity
+        {
+            Id = Guid.Parse("50000000-0000-0000-0000-000000000001"),
+            Value = "repair",
+        });
+        context.SaveChanges();
+        var indexPath = Path.Combine(
+            directory,
+            "entities",
+            JsonColdStoreNameEncoder.EncodePathSegment(typeof(WritableEntity).FullName!),
+            "indexes",
+            JsonColdStoreNameEncoder.EncodePathSegment("Value") + ".json");
+        File.Delete(indexPath);
+
+        Assert.Empty(await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>("Value", "repair"));
+        var rebuilt = await context.Database.RebuildJsonColdStoreIndexesAsync<WritableEntity>();
+        var repaired = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>("Value", "repair");
+
+        Assert.Equal(1, rebuilt);
+        Assert.Single(repaired);
+        Assert.Equal("repair", repaired[0].Value);
+    }
+
+    [Fact]
     public void QueryThrowsClearUnsupportedMessageUntilQueryPipelineExists()
     {
         var directory = TestDirectory("query-unsupported-" + Guid.NewGuid().ToString("N"));

@@ -23,8 +23,12 @@ internal sealed class JsonColdStoreEntityRecordStore
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _modelDescriptor = modelDescriptor ?? throw new ArgumentNullException(nameof(modelDescriptor));
-        _modelCatalog = new JsonColdStoreModelCatalog(session.Options);
-        _indexStore = new JsonColdStoreIndexStore(session.Options);
+        _modelCatalog = new JsonColdStoreModelCatalog(
+            session.Options,
+            session.Metadata.Policy.EncryptionEnabled);
+        _indexStore = new JsonColdStoreIndexStore(
+            session.Options,
+            session.Metadata.Policy.EncryptionEnabled);
     }
 
     internal async Task WriteEntityAsync<TEntity>(

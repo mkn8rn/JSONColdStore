@@ -22,10 +22,12 @@ internal sealed class JsonColdStoreModelCatalog
     };
 
     private readonly JsonColdStoreOptions _options;
+    private readonly bool _protectDocument;
 
-    internal JsonColdStoreModelCatalog(JsonColdStoreOptions options)
+    internal JsonColdStoreModelCatalog(JsonColdStoreOptions options, bool protectDocument)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _protectDocument = protectDocument;
     }
 
     internal async Task<bool> EnsureCompatibleAsync(
@@ -70,11 +72,14 @@ internal sealed class JsonColdStoreModelCatalog
 
     private async Task<JsonColdStoreModelDocument> ReadAsync(CancellationToken cancellationToken)
     {
-        await using var stream = File.OpenRead(GetModelFilePath());
-        var document = await JsonSerializer.DeserializeAsync<JsonColdStoreModelDocument>(
-            stream,
-            CatalogJsonOptions,
+        var bytes = await JsonColdStoreAtomicFileWriter.ReadAsync(
+            _options.DatabaseDirectory,
+            [ModelFileName],
             cancellationToken);
+        var json = DecodeDocument(bytes);
+        var document = JsonSerializer.Deserialize<JsonColdStoreModelDocument>(
+            json,
+            CatalogJsonOptions);
 
         return document
             ?? throw new InvalidDataException("The JSONColdStore model catalog file is empty.");
@@ -84,7 +89,8 @@ internal sealed class JsonColdStoreModelCatalog
         JsonColdStoreModelDocument document,
         CancellationToken cancellationToken)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(document, CatalogJsonOptions);
+        var json = JsonSerializer.SerializeToUtf8Bytes(document, CatalogJsonOptions);
+        var bytes = EncodeDocument(json);
         await JsonColdStoreAtomicFileWriter.WriteAsync(
             _options.DatabaseDirectory,
             [ModelFileName],
@@ -92,6 +98,16 @@ internal sealed class JsonColdStoreModelCatalog
             _options.FsyncOnWrite,
             cancellationToken);
     }
+
+    private byte[] EncodeDocument(ReadOnlySpan<byte> json) =>
+        _protectDocument
+            ? JsonColdStorePayloadCodec.Encode(json, _options)
+            : json.ToArray();
+
+    private byte[] DecodeDocument(ReadOnlySpan<byte> bytes) =>
+        _protectDocument
+            ? JsonColdStorePayloadCodec.Decode(bytes, _options)
+            : bytes.ToArray();
 
     private static void Validate(JsonColdStoreModelDocument stored, string expectedHash)
     {

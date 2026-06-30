@@ -1,3 +1,4 @@
+using System.Text;
 using EFC.JSONColdStore;
 using EFC.JSONColdStore.Infrastructure;
 using EFC.JSONColdStore.Storage;
@@ -41,6 +42,21 @@ public sealed class JsonColdStoreEntityRecordStoreTests
         Assert.Equal(entity.Id, read.Id);
         Assert.Equal(entity.ConsumerId, read.ConsumerId);
         Assert.Equal(entity.Payload, read.Payload);
+
+        var indexPath = Path.Combine(
+            root,
+            "entities",
+            JsonColdStoreNameEncoder.EncodePathSegment(descriptor.EntityName),
+            "indexes",
+            JsonColdStoreNameEncoder.EncodePathSegment("ConsumerId") + ".json");
+        var indexBytes = await File.ReadAllBytesAsync(indexPath);
+        var modelCatalogBytes = await File.ReadAllBytesAsync(Path.Combine(root, "_model.json"));
+        Assert.False(ContainsBytes(indexBytes, entity.ConsumerId));
+        Assert.False(ContainsBytes(modelCatalogBytes, nameof(ConsumerEvent.ConsumerId)));
+
+        var indexed = await entityStore.ReadEntitiesByIndexAsync<ConsumerEvent>("ConsumerId", entity.ConsumerId);
+        Assert.Single(indexed);
+        Assert.Equal(entity.Id, indexed[0].Id);
     }
 
     [Fact]
@@ -336,6 +352,9 @@ public sealed class JsonColdStoreEntityRecordStoreTests
         Directory.CreateDirectory(root);
         return root;
     }
+
+    private static bool ContainsBytes(byte[] haystack, string needle) =>
+        haystack.AsSpan().IndexOf(Encoding.UTF8.GetBytes(needle)) >= 0;
 
     private sealed class ConsumerEvent
     {

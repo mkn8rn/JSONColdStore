@@ -11,10 +11,12 @@ internal sealed class JsonColdStoreIndexStore
     };
 
     private readonly JsonColdStoreOptions _options;
+    private readonly bool _protectDocuments;
 
-    internal JsonColdStoreIndexStore(JsonColdStoreOptions options)
+    internal JsonColdStoreIndexStore(JsonColdStoreOptions options, bool protectDocuments)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _protectDocuments = protectDocuments;
     }
 
     internal async Task UpsertAsync(
@@ -99,11 +101,11 @@ internal sealed class JsonColdStoreIndexStore
         if (!File.Exists(path))
             return new JsonColdStoreIndexDocument(new Dictionary<string, List<string>>(StringComparer.Ordinal));
 
-        await using var stream = File.OpenRead(path);
-        var document = await JsonSerializer.DeserializeAsync<JsonColdStoreIndexDocument>(
-            stream,
-            IndexJsonOptions,
-            cancellationToken);
+        var bytes = await File.ReadAllBytesAsync(path, cancellationToken);
+        var json = DecodeDocument(bytes);
+        var document = JsonSerializer.Deserialize<JsonColdStoreIndexDocument>(
+            json,
+            IndexJsonOptions);
 
         return document ?? new JsonColdStoreIndexDocument(new Dictionary<string, List<string>>(StringComparer.Ordinal));
     }
@@ -114,7 +116,8 @@ internal sealed class JsonColdStoreIndexStore
         JsonColdStoreIndexDocument document,
         CancellationToken cancellationToken)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(document, IndexJsonOptions);
+        var json = JsonSerializer.SerializeToUtf8Bytes(document, IndexJsonOptions);
+        var bytes = EncodeDocument(json);
         await JsonColdStoreAtomicFileWriter.WriteAsync(
             _options.DatabaseDirectory,
             GetIndexPathSegments(entityName, indexName),
@@ -122,6 +125,16 @@ internal sealed class JsonColdStoreIndexStore
             _options.FsyncOnWrite,
             cancellationToken);
     }
+
+    private byte[] EncodeDocument(ReadOnlySpan<byte> json) =>
+        _protectDocuments
+            ? JsonColdStorePayloadCodec.Encode(json, _options)
+            : json.ToArray();
+
+    private byte[] DecodeDocument(ReadOnlySpan<byte> bytes) =>
+        _protectDocuments
+            ? JsonColdStorePayloadCodec.Decode(bytes, _options)
+            : bytes.ToArray();
 
     private static void RemoveRecordId(JsonColdStoreIndexDocument document, string recordId)
     {

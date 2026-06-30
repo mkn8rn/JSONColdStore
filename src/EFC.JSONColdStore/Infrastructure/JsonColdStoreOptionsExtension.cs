@@ -1,4 +1,7 @@
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata.Conventions.Infrastructure;
+using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -18,7 +21,15 @@ internal sealed class JsonColdStoreOptionsExtension(JsonColdStoreOptions options
         ArgumentNullException.ThrowIfNull(services);
 
         new EntityFrameworkServicesBuilder(services)
+            .TryAdd<LoggingDefinitions, JsonColdStoreLoggingDefinitions>()
             .TryAdd<IDatabaseProvider, DatabaseProvider<JsonColdStoreOptionsExtension>>()
+            .TryAdd<IDatabase, JsonColdStoreDatabase>()
+            .TryAdd<IDbContextTransactionManager, JsonColdStoreTransactionManager>()
+            .TryAdd<IDatabaseCreator, JsonColdStoreDatabaseCreator>()
+            .TryAdd<IQueryContextFactory, JsonColdStoreQueryContextFactory>()
+            .TryAdd<IProviderConventionSetBuilder, JsonColdStoreConventionSetBuilder>()
+            .TryAdd<ITypeMappingSource, JsonColdStoreTypeMappingSource>()
+            .TryAdd<IExecutionStrategyFactory, JsonColdStoreExecutionStrategyFactory>()
             .TryAddCoreServices();
     }
 
@@ -62,3 +73,5 @@ internal sealed class JsonColdStoreOptionsExtension(JsonColdStoreOptions options
         }
     }
 }
+
+internal sealed class JsonColdStoreLoggingDefinitions : LoggingDefinitions;

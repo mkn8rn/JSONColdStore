@@ -85,6 +85,43 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         Assert.Equal("True", debugInfo["JSONColdStore:Encrypted"]);
     }
 
+    [Fact]
+    public void ConfiguredContextReportsJsonColdStoreProviderName()
+    {
+        var builder = new DbContextOptionsBuilder<TestDbContext>();
+        builder.UseJsonColdStoreDatabase(TestDirectory("provider-name"));
+
+        using var context = new TestDbContext(builder.Options);
+
+        Assert.Equal("EFC.JSONColdStore", context.Database.ProviderName);
+    }
+
+    [Fact]
+    public void EnsureCreatedCreatesRootMetadataOnce()
+    {
+        var directory = TestDirectory("ensure-created-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<TestDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new TestDbContext(builder.Options);
+
+        Assert.True(context.Database.EnsureCreated());
+        Assert.False(context.Database.EnsureCreated());
+        Assert.True(File.Exists(Path.Combine(directory, "_store.json")));
+    }
+
+    [Fact]
+    public void BeginTransactionThrowsUntilTransactionsAreImplemented()
+    {
+        var builder = new DbContextOptionsBuilder<TestDbContext>();
+        builder.UseJsonColdStoreDatabase(TestDirectory("transaction-unsupported"));
+        using var context = new TestDbContext(builder.Options);
+
+        var exception = Assert.Throws<NotSupportedException>(
+            () => context.Database.BeginTransaction());
+
+        Assert.Contains("Explicit transactions are not implemented yet", exception.Message);
+    }
+
     private static string TestDirectory(string name) =>
         Path.Combine(Path.GetTempPath(), "jsoncoldstore-tests", name);
 

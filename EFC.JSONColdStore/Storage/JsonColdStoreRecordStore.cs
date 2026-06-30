@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace EFC.JSONColdStore.Storage;
@@ -13,10 +14,12 @@ internal sealed class JsonColdStoreRecordStore
     };
 
     private readonly JsonColdStoreOptions _options;
+    private readonly bool _protectManifests;
 
-    internal JsonColdStoreRecordStore(JsonColdStoreOptions options)
+    internal JsonColdStoreRecordStore(JsonColdStoreOptions options, bool protectManifests = false)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _protectManifests = protectManifests;
     }
 
     internal async Task WriteRecordAsync(
@@ -29,7 +32,7 @@ internal sealed class JsonColdStoreRecordStore
         var payload = JsonColdStorePayloadCodec.Encode(utf8Json.Span, _options);
         var manifest = JsonColdStoreWriteManifest.CreateWrite(recordPath, payload.Length);
         var manifestPath = GetPendingManifestPathSegments(manifest.ManifestId);
-        var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(manifest, ManifestJsonOptions);
+        var manifestBytes = EncodeManifest(manifest);
 
         await JsonColdStoreAtomicFileWriter.WriteAsync(
             _options.DatabaseDirectory,
@@ -63,7 +66,7 @@ internal sealed class JsonColdStoreRecordStore
         var recordPath = GetRecordPathSegments(entityName, recordId);
         var manifest = JsonColdStoreWriteManifest.CreateDelete(recordPath);
         var manifestPath = GetPendingManifestPathSegments(manifest.ManifestId);
-        var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(manifest, ManifestJsonOptions);
+        var manifestBytes = EncodeManifest(manifest);
 
         await JsonColdStoreAtomicFileWriter.WriteAsync(
             _options.DatabaseDirectory,
@@ -168,11 +171,16 @@ internal sealed class JsonColdStoreRecordStore
             JsonColdStoreWriteManifest? manifest;
             try
             {
-                await using var stream = File.OpenRead(manifestPath);
-                manifest = await JsonSerializer.DeserializeAsync<JsonColdStoreWriteManifest>(
-                    stream,
-                    ManifestJsonOptions,
-                    cancellationToken);
+                var manifestBytes = await File.ReadAllBytesAsync(manifestPath, cancellationToken);
+                manifest = DecodeManifest(manifestBytes);
+            }
+            catch (CryptographicException)
+            {
+                throw;
+            }
+            catch (InvalidOperationException) when (_protectManifests)
+            {
+                throw;
             }
             catch
             {
@@ -220,6 +228,25 @@ internal sealed class JsonColdStoreRecordStore
         }
 
         return new JsonColdStoreRecoveryResult(completed, failed);
+    }
+
+    private byte[] EncodeManifest(JsonColdStoreWriteManifest manifest)
+    {
+        var json = JsonSerializer.SerializeToUtf8Bytes(manifest, ManifestJsonOptions);
+        return _protectManifests
+            ? JsonColdStorePayloadCodec.Encode(json, _options)
+            : json;
+    }
+
+    private JsonColdStoreWriteManifest? DecodeManifest(ReadOnlySpan<byte> bytes)
+    {
+        var json = _protectManifests
+            ? JsonColdStorePayloadCodec.Decode(bytes, _options)
+            : bytes.ToArray();
+
+        return JsonSerializer.Deserialize<JsonColdStoreWriteManifest>(
+            json,
+            ManifestJsonOptions);
     }
 
     internal static string[] GetRecordPathSegments(string entityName, string recordId) =>

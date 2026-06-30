@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using EFC.JSONColdStore;
@@ -165,6 +166,67 @@ public sealed class JsonColdStoreRecordStoreTests
     }
 
     [Fact]
+    public async Task RecoverPendingManifestsReadsProtectedManifest()
+    {
+        var root = NewTempDirectory();
+        using var key = JsonColdStoreEncryptionKey.FromBytes(new byte[32]);
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseEncryptionKey(key)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options, protectManifests: true);
+        var targetSegments = JsonColdStoreRecordStore.GetRecordPathSegments("Entity", "protected-record");
+        await JsonColdStoreAtomicFileWriter.WriteAsync(
+            root,
+            targetSegments,
+            JsonColdStorePayloadCodec.Encode("payload"u8, options),
+            fsync: false);
+        var manifest = JsonColdStoreWriteManifest.CreateWrite(targetSegments, payloadLength: 7);
+        await WriteManifestAsync(root, manifest, options, protect: true);
+
+        var manifestBytes = await File.ReadAllBytesAsync(ManifestPath(root, manifest.ManifestId));
+        Assert.False(ContainsBytes(manifestBytes, "Entity"));
+        Assert.False(ContainsBytes(manifestBytes, "records"));
+        var result = await store.RecoverPendingManifestsAsync();
+
+        Assert.Equal(1, result.CompletedManifests);
+        Assert.Equal(0, result.FailedManifests);
+        Assert.False(File.Exists(ManifestPath(root, manifest.ManifestId)));
+    }
+
+    [Fact]
+    public async Task RecoverPendingManifestsRejectsProtectedManifestWithWrongKey()
+    {
+        var root = NewTempDirectory();
+        using var correctKey = JsonColdStoreEncryptionKey.FromBytes(new byte[32]);
+        using var wrongKey = JsonColdStoreEncryptionKey.FromBytes(Enumerable.Repeat((byte)7, 32).ToArray());
+        var writeOptions = new JsonColdStoreOptionsBuilder(root)
+            .UseEncryptionKey(correctKey)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var readOptions = new JsonColdStoreOptionsBuilder(root)
+            .UseEncryptionKey(wrongKey)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(readOptions, protectManifests: true);
+        var manifest = JsonColdStoreWriteManifest.CreateWrite(
+            JsonColdStoreRecordStore.GetRecordPathSegments("Entity", "wrong-key"),
+            payloadLength: 7);
+        await WriteManifestAsync(root, manifest, writeOptions, protect: true);
+
+        await Assert.ThrowsAnyAsync<CryptographicException>(
+            () => store.RecoverPendingManifestsAsync());
+
+        Assert.True(File.Exists(ManifestPath(root, manifest.ManifestId)));
+        Assert.False(File.Exists(Path.Combine(
+            root,
+            "_transactions",
+            "failed",
+            manifest.ManifestId.ToString("N") + ".json")));
+    }
+
+    [Fact]
     public async Task RecoverPendingManifestsMovesIncompleteManifestToFailed()
     {
         var root = NewTempDirectory();
@@ -236,12 +298,23 @@ public sealed class JsonColdStoreRecordStoreTests
         Assert.DoesNotContain("/", encoded);
     }
 
-    private static async Task WriteManifestAsync(string root, JsonColdStoreWriteManifest manifest)
+    private static async Task WriteManifestAsync(
+        string root,
+        JsonColdStoreWriteManifest manifest,
+        JsonColdStoreOptions? options = null,
+        bool protect = false)
     {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(manifest, ManifestJsonOptions);
+        if (protect)
+        {
+            ArgumentNullException.ThrowIfNull(options);
+            bytes = JsonColdStorePayloadCodec.Encode(bytes, options);
+        }
+
         await JsonColdStoreAtomicFileWriter.WriteAsync(
             root,
             JsonColdStoreRecordStore.GetPendingManifestPathSegments(manifest.ManifestId),
-            JsonSerializer.SerializeToUtf8Bytes(manifest, ManifestJsonOptions),
+            bytes,
             fsync: false);
     }
 
@@ -254,4 +327,7 @@ public sealed class JsonColdStoreRecordStoreTests
         Directory.CreateDirectory(root);
         return root;
     }
+
+    private static bool ContainsBytes(byte[] haystack, string needle) =>
+        haystack.AsSpan().IndexOf(Encoding.UTF8.GetBytes(needle)) >= 0;
 }

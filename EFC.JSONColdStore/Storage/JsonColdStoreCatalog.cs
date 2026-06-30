@@ -48,14 +48,13 @@ internal sealed class JsonColdStoreCatalog
     internal async Task<JsonColdStoreStoreMetadata> LoadAndValidateAsync(
         CancellationToken cancellationToken = default)
     {
-        JsonColdStoreStoreMetadata? metadata;
-        await using (var stream = File.OpenRead(GetStoreFilePath()))
-        {
-            metadata = await JsonSerializer.DeserializeAsync<JsonColdStoreStoreMetadata>(
-                stream,
-                StoreJsonOptions,
-                cancellationToken);
-        }
+        var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(
+            _options,
+            GetStoreFilePath(),
+            cancellationToken);
+        var metadata = JsonSerializer.Deserialize<JsonColdStoreStoreMetadata>(
+            bytes,
+            StoreJsonOptions);
 
         if (metadata is null)
             throw new InvalidDataException("The JSONColdStore metadata file is empty.");

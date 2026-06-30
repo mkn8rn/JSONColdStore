@@ -48,6 +48,17 @@ internal static class JsonColdStoreAtomicFileWriter
         return await File.ReadAllBytesAsync(targetPath, cancellationToken);
     }
 
+    internal static async Task<byte[]> ReadAsync(
+        JsonColdStoreOptions options,
+        IEnumerable<string> pathSegments,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        var targetPath = ResolvePath(options.DatabaseDirectory, pathSegments);
+        return await JsonColdStoreFileReader.ReadAllBytesAsync(options, targetPath, cancellationToken);
+    }
+
     private static string ResolvePath(string databaseDirectory, IEnumerable<string> pathSegments)
     {
         ArgumentNullException.ThrowIfNull(pathSegments);

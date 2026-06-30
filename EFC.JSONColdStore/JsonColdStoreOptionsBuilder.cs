@@ -14,6 +14,7 @@ public sealed class JsonColdStoreOptionsBuilder
     private JsonColdStoreAsyncFlushOptions _asyncFlush = new();
     private JsonColdStoreRetryOptions _flushRetry = JsonColdStoreRetryOptions.DefaultFlushRetry;
     private JsonColdStoreRetryOptions _transactionReplay = JsonColdStoreRetryOptions.DefaultTransactionReplay;
+    private JsonColdStoreRetryOptions _readRetry = JsonColdStoreRetryOptions.DefaultReadRetry;
     private JsonColdStoreIntegrityOptions _integrity = new();
     private JsonColdStoreQuarantineOptions _quarantine = new();
     private JsonColdStoreIndexMaintenanceOptions _indexMaintenance = new();
@@ -107,6 +108,13 @@ public sealed class JsonColdStoreOptionsBuilder
     public JsonColdStoreOptionsBuilder UseTransactionReplay(int maxRetries)
     {
         _transactionReplay = CreateRetryOptions(maxRetries, TimeSpan.Zero, nameof(maxRetries));
+        return this;
+    }
+
+    /// <summary>Sets retry behavior for transient storage read failures.</summary>
+    public JsonColdStoreOptionsBuilder UseReadRetry(int maxRetries, TimeSpan baseDelay)
+    {
+        _readRetry = CreateRetryOptions(maxRetries, baseDelay, nameof(maxRetries));
         return this;
     }
 
@@ -211,6 +219,7 @@ public sealed class JsonColdStoreOptionsBuilder
         AsyncFlush = _asyncFlush,
         FlushRetry = _flushRetry,
         TransactionReplay = _transactionReplay,
+        ReadRetry = _readRetry,
         Integrity = _integrity,
         Quarantine = _quarantine,
         IndexMaintenance = _indexMaintenance,

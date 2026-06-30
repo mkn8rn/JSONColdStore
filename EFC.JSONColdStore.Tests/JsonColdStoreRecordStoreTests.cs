@@ -53,6 +53,56 @@ public sealed class JsonColdStoreRecordStoreTests
     }
 
     [Fact]
+    public async Task ReadRecordAsyncRetriesTransientReadLock()
+    {
+        var root = NewTempDirectory();
+        var writeOptions = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var writer = new JsonColdStoreRecordStore(writeOptions);
+        await writer.WriteRecordAsync("Entity", "locked", "payload"u8.ToArray());
+        var recordPath = JsonColdStorePathValidator.GetSafeChildPath(
+            root,
+            [.. JsonColdStoreRecordStore.GetRecordPathSegments("Entity", "locked")]);
+
+        var noRetryOptions = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .UseReadRetry(maxRetries: 0, baseDelay: TimeSpan.Zero)
+            .Build();
+        var retryOptions = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .UseReadRetry(maxRetries: 20, baseDelay: TimeSpan.FromMilliseconds(10))
+            .Build();
+        await using var locked = new FileStream(
+            recordPath,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None,
+            bufferSize: 4096,
+            FileOptions.Asynchronous);
+
+        var immediateFailure = await Record.ExceptionAsync(
+            () => new JsonColdStoreRecordStore(noRetryOptions).ReadRecordAsync("Entity", "locked"));
+
+        Assert.True(
+            immediateFailure is IOException or UnauthorizedAccessException,
+            "Exclusive file locks should fail immediately when read retries are disabled.");
+
+        var retryingRead = new JsonColdStoreRecordStore(retryOptions).ReadRecordAsync("Entity", "locked");
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        Assert.False(retryingRead.IsCompleted);
+
+        await locked.DisposeAsync();
+
+        var read = await retryingRead.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("payload"u8.ToArray(), read);
+    }
+
+    [Fact]
     public async Task WriteRecordAsyncAppendsPlainEventLogWithoutRawRecordId()
     {
         var root = NewTempDirectory();

@@ -73,7 +73,7 @@ internal sealed class JsonColdStoreModelCatalog
     private async Task<JsonColdStoreModelDocument> ReadAsync(CancellationToken cancellationToken)
     {
         var bytes = await JsonColdStoreAtomicFileWriter.ReadAsync(
-            _options.DatabaseDirectory,
+            _options,
             [ModelFileName],
             cancellationToken);
         var json = DecodeDocument(bytes);

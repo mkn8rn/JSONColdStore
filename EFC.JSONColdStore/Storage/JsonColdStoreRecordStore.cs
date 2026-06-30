@@ -119,7 +119,7 @@ internal sealed class JsonColdStoreRecordStore
             _options.DatabaseDirectory,
             [.. recordPath]);
         var payload = await JsonColdStoreAtomicFileWriter.ReadAsync(
-            _options.DatabaseDirectory,
+            _options,
             recordPath,
             cancellationToken);
 
@@ -159,7 +159,7 @@ internal sealed class JsonColdStoreRecordStore
         foreach (var recordPath in Directory.EnumerateFiles(recordsDirectory, "*.jcs").Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var payload = await File.ReadAllBytesAsync(recordPath, cancellationToken);
+            var payload = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, recordPath, cancellationToken);
             byte[] decoded;
             try
             {
@@ -202,7 +202,7 @@ internal sealed class JsonColdStoreRecordStore
                      SearchOption.AllDirectories).Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var payload = await File.ReadAllBytesAsync(recordPath, cancellationToken);
+            var payload = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, recordPath, cancellationToken);
             try
             {
                 _ = JsonColdStorePayloadCodec.Decode(payload, verificationOptions);
@@ -253,7 +253,7 @@ internal sealed class JsonColdStoreRecordStore
             if (!File.Exists(recordPath))
                 continue;
 
-            var payload = await File.ReadAllBytesAsync(recordPath, cancellationToken);
+            var payload = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, recordPath, cancellationToken);
             try
             {
                 _ = JsonColdStorePayloadCodec.Decode(payload, repairOptions);
@@ -295,7 +295,7 @@ internal sealed class JsonColdStoreRecordStore
             try
             {
                 var manifestBytes = await ExecuteReplayAsync(
-                    token => File.ReadAllBytesAsync(manifestPath, token),
+                    token => JsonColdStoreFileReader.ReadAllBytesAsync(_options, manifestPath, token),
                     cancellationToken);
                 manifest = DecodeManifest(manifestBytes);
             }

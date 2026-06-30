@@ -32,6 +32,9 @@ public sealed record JsonColdStoreOptions
     /// <summary>Retry behavior for replaying pending transaction manifests.</summary>
     public JsonColdStoreRetryOptions TransactionReplay { get; init; } = JsonColdStoreRetryOptions.DefaultTransactionReplay;
 
+    /// <summary>Retry behavior for transient storage read failures.</summary>
+    public JsonColdStoreRetryOptions ReadRetry { get; init; } = JsonColdStoreRetryOptions.DefaultReadRetry;
+
     /// <summary>Checksum and verification settings.</summary>
     public JsonColdStoreIntegrityOptions Integrity { get; init; } = new();
 
@@ -89,6 +92,13 @@ public sealed record JsonColdStoreRetryOptions
     {
         MaxRetries = 3,
         BaseDelay = TimeSpan.Zero,
+    };
+
+    /// <summary>Default retry policy for transient storage read failures.</summary>
+    public static JsonColdStoreRetryOptions DefaultReadRetry { get; } = new()
+    {
+        MaxRetries = 3,
+        BaseDelay = TimeSpan.FromMilliseconds(25),
     };
 
     /// <summary>Maximum number of retry attempts after the first failure.</summary>

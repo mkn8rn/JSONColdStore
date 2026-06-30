@@ -18,6 +18,8 @@ public sealed class JsonColdStoreOptionsBuilderTests
         Assert.True(options.Integrity.EnableChecksums);
         Assert.True(options.Integrity.VerifyOnStartup);
         Assert.False(options.Integrity.VerifyOnRead);
+        Assert.Equal(3, options.ReadRetry.MaxRetries);
+        Assert.Equal(TimeSpan.FromMilliseconds(25), options.ReadRetry.BaseDelay);
     }
 
     [Fact]
@@ -38,6 +40,7 @@ public sealed class JsonColdStoreOptionsBuilderTests
             .UseAsyncFlush(queueCapacity: 32)
             .UseFlushRetry(maxRetries: 5, baseDelay: TimeSpan.FromMilliseconds(25))
             .UseTransactionReplay(maxRetries: 7)
+            .UseReadRetry(maxRetries: 4, baseDelay: TimeSpan.FromMilliseconds(10))
             .UseChecksums(verifyOnStartup: false, verifyOnRead: true)
             .UseQuarantine(TimeSpan.FromDays(9))
             .UseIndexMaintenance(TimeSpan.Zero, rebuildOnCatalogMismatch: false)
@@ -55,6 +58,8 @@ public sealed class JsonColdStoreOptionsBuilderTests
         Assert.Equal(5, options.FlushRetry.MaxRetries);
         Assert.Equal(TimeSpan.FromMilliseconds(25), options.FlushRetry.BaseDelay);
         Assert.Equal(7, options.TransactionReplay.MaxRetries);
+        Assert.Equal(4, options.ReadRetry.MaxRetries);
+        Assert.Equal(TimeSpan.FromMilliseconds(10), options.ReadRetry.BaseDelay);
         Assert.False(options.Integrity.VerifyOnStartup);
         Assert.True(options.Integrity.VerifyOnRead);
         Assert.Equal(TimeSpan.FromDays(9), options.Quarantine.Retention);
@@ -80,6 +85,8 @@ public sealed class JsonColdStoreOptionsBuilderTests
         Assert.Throws<ArgumentOutOfRangeException>(() => builder.UseFlushRetry(-1, TimeSpan.Zero));
         Assert.Throws<ArgumentOutOfRangeException>(() => builder.UseFlushRetry(1, TimeSpan.FromMilliseconds(-1)));
         Assert.Throws<ArgumentOutOfRangeException>(() => builder.UseTransactionReplay(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => builder.UseReadRetry(-1, TimeSpan.Zero));
+        Assert.Throws<ArgumentOutOfRangeException>(() => builder.UseReadRetry(1, TimeSpan.FromMilliseconds(-1)));
     }
 
     private static string TestDirectory(string name) =>

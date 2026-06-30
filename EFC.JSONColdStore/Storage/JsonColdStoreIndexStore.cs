@@ -118,7 +118,7 @@ internal sealed class JsonColdStoreIndexStore
         if (!File.Exists(path))
             return new JsonColdStoreIndexDocument(new Dictionary<string, List<string>>(StringComparer.Ordinal));
 
-        var bytes = await File.ReadAllBytesAsync(path, cancellationToken);
+        var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, path, cancellationToken);
         var json = DecodeDocument(bytes);
         var document = JsonSerializer.Deserialize<JsonColdStoreIndexDocument>(
             json,

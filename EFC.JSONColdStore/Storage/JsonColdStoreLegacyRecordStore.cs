@@ -40,7 +40,8 @@ internal sealed class JsonColdStoreLegacyRecordStore
     {
         ArgumentNullException.ThrowIfNull(descriptor);
 
-        var bytes = await File.ReadAllBytesAsync(
+        var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(
+            _options,
             GetRecordPath(descriptor, recordId),
             cancellationToken);
         return Decode(bytes);
@@ -64,7 +65,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
             if (fileName.StartsWith('_'))
                 continue;
 
-            var bytes = await File.ReadAllBytesAsync(file, cancellationToken);
+            var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, file, cancellationToken);
             yield return new JsonColdStoreLegacyRecord(
                 Path.GetFileNameWithoutExtension(fileName),
                 Decode(bytes));
@@ -100,11 +101,10 @@ internal sealed class JsonColdStoreLegacyRecordStore
         if (!File.Exists(shardPath))
             return JsonColdStoreLegacyIndexLookup.FallbackToScan;
 
-        await using var stream = File.OpenRead(shardPath);
-        var shard = await JsonSerializer.DeserializeAsync<Dictionary<string, List<string>>>(
-            stream,
-            IndexJsonOptions,
-            cancellationToken);
+        var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, shardPath, cancellationToken);
+        var shard = JsonSerializer.Deserialize<Dictionary<string, List<string>>>(
+            bytes,
+            IndexJsonOptions);
 
         if (shard is not null && shard.TryGetValue(indexKey, out var recordIds))
             return JsonColdStoreLegacyIndexLookup.FromIndex(recordIds);
@@ -146,11 +146,10 @@ internal sealed class JsonColdStoreLegacyRecordStore
         if (!File.Exists(shardPath))
             return JsonColdStoreLegacyIndexLookup.FromIndex([]);
 
-        await using var stream = File.OpenRead(shardPath);
-        var recordIds = await JsonSerializer.DeserializeAsync<List<string>>(
-            stream,
-            IndexJsonOptions,
-            cancellationToken);
+        var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, shardPath, cancellationToken);
+        var recordIds = JsonSerializer.Deserialize<List<string>>(
+            bytes,
+            IndexJsonOptions);
 
         return JsonColdStoreLegacyIndexLookup.FromIndex(recordIds ?? []);
     }

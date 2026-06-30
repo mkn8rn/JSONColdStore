@@ -868,6 +868,59 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncScansLegacyRecordsWhenLegacyIndexShardIsCorrupt()
+    {
+        var directory = TestDirectory("legacy-corrupt-index-" + Guid.NewGuid().ToString("N"));
+        var matchId = Guid.Parse("70000000-0000-0000-0000-000000000008");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = matchId,
+            Value = "corrupt-index-match",
+        });
+        await File.WriteAllTextAsync(
+            Path.Combine(directory, nameof(WritableEntity), "_index_Value.json"),
+            "not valid json");
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var matches = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            "Value",
+            "corrupt-index-match");
+
+        Assert.Single(matches);
+        Assert.Equal(matchId, matches[0].Id);
+    }
+
+    [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncScansLegacyRecordsWhenKeyScopedShardIsCorrupt()
+    {
+        var directory = TestDirectory("legacy-corrupt-key-scoped-index-" + Guid.NewGuid().ToString("N"));
+        var matchId = Guid.Parse("70000000-0000-0000-0000-000000000009");
+        var indexKey = Guid.Parse("71000000-0000-0000-0000-000000000003");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = matchId,
+            Value = indexKey.ToString(),
+        });
+        var indexDirectory = Path.Combine(directory, nameof(WritableEntity), "_index_Value");
+        Directory.CreateDirectory(indexDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(indexDirectory, $"{indexKey:D}.json"),
+            "not valid json");
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var matches = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            "Value",
+            indexKey.ToString());
+
+        Assert.Single(matches);
+        Assert.Equal(matchId, matches[0].Id);
+    }
+
+    [Fact]
     public async Task SaveChangesRetiresSameKeyLegacyRecordAfterNewFormatWrite()
     {
         var directory = TestDirectory("legacy-retire-" + Guid.NewGuid().ToString("N"));

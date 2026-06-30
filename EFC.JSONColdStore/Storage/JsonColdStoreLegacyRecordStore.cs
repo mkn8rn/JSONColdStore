@@ -101,10 +101,18 @@ internal sealed class JsonColdStoreLegacyRecordStore
         if (!File.Exists(shardPath))
             return JsonColdStoreLegacyIndexLookup.FallbackToScan;
 
-        var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, shardPath, cancellationToken);
-        var shard = JsonSerializer.Deserialize<Dictionary<string, List<string>>>(
-            bytes,
-            IndexJsonOptions);
+        Dictionary<string, List<string>>? shard;
+        try
+        {
+            var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, shardPath, cancellationToken);
+            shard = JsonSerializer.Deserialize<Dictionary<string, List<string>>>(
+                bytes,
+                IndexJsonOptions);
+        }
+        catch (Exception ex) when (IsRecoverableLegacyIndexReadFailure(ex))
+        {
+            return JsonColdStoreLegacyIndexLookup.FallbackToScan;
+        }
 
         if (shard is not null && shard.TryGetValue(indexKey, out var recordIds))
             return JsonColdStoreLegacyIndexLookup.FromIndex(recordIds);
@@ -146,13 +154,27 @@ internal sealed class JsonColdStoreLegacyRecordStore
         if (!File.Exists(shardPath))
             return JsonColdStoreLegacyIndexLookup.FromIndex([]);
 
-        var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, shardPath, cancellationToken);
-        var recordIds = JsonSerializer.Deserialize<List<string>>(
-            bytes,
-            IndexJsonOptions);
+        List<string>? recordIds;
+        try
+        {
+            var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, shardPath, cancellationToken);
+            recordIds = JsonSerializer.Deserialize<List<string>>(
+                bytes,
+                IndexJsonOptions);
+        }
+        catch (Exception ex) when (IsRecoverableLegacyIndexReadFailure(ex))
+        {
+            return JsonColdStoreLegacyIndexLookup.FallbackToScan;
+        }
 
         return JsonColdStoreLegacyIndexLookup.FromIndex(recordIds ?? []);
     }
+
+    private static bool IsRecoverableLegacyIndexReadFailure(Exception exception) =>
+        exception is IOException
+            or UnauthorizedAccessException
+            or JsonException
+            or InvalidDataException;
 
     private byte[] Decode(ReadOnlySpan<byte> bytes)
     {

@@ -1028,6 +1028,55 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task VerifyJsonColdStoreAsyncRejectsIndexMissingCurrentRecord()
+    {
+        var directory = TestDirectory("verify-index-missing-current-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var id = Guid.Parse("51000000-0000-0000-0000-000000000011");
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.Add(new WritableEntity
+        {
+            Id = id,
+            Value = "missing-current-index",
+        });
+        context.SaveChanges();
+        await RemoveRecordIdFromIndexAsync(IndexPath(directory, "Value"), id.ToString());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => context.Database.VerifyJsonColdStoreAsync());
+
+        Assert.Contains("does not match current record values", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Value", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VerifyJsonColdStoreAsyncRejectsIndexRecordInWrongBucket()
+    {
+        var directory = TestDirectory("verify-index-wrong-bucket-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var id = Guid.Parse("51000000-0000-0000-0000-000000000012");
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.Add(new WritableEntity
+        {
+            Id = id,
+            Value = "correct-index-bucket",
+        });
+        context.SaveChanges();
+        await MoveRecordIdToIndexBucketAsync(
+            IndexPath(directory, "Value"),
+            id.ToString(),
+            "wrong-index-bucket");
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => context.Database.VerifyJsonColdStoreAsync());
+
+        Assert.Contains("does not match current record values", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Value", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RepairJsonColdStoreAsyncQuarantinesCorruptRecordAndKeepsValidRecords()
     {
         var directory = TestDirectory("repair-corrupt-" + Guid.NewGuid().ToString("N"));
@@ -2326,6 +2375,52 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         await File.WriteAllTextAsync(
             indexPath,
             root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static async Task RemoveRecordIdFromIndexAsync(string indexPath, string recordId)
+    {
+        var root = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))?.AsObject()
+            ?? throw new InvalidDataException("The index document could not be parsed.");
+        RemoveRecordIdFromBuckets(root, recordId);
+        await File.WriteAllTextAsync(
+            indexPath,
+            root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static async Task MoveRecordIdToIndexBucketAsync(
+        string indexPath,
+        string recordId,
+        string indexKey)
+    {
+        var root = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))?.AsObject()
+            ?? throw new InvalidDataException("The index document could not be parsed.");
+        var buckets = RemoveRecordIdFromBuckets(root, recordId);
+        buckets[indexKey] = new JsonArray { recordId };
+        await File.WriteAllTextAsync(
+            indexPath,
+            root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static JsonObject RemoveRecordIdFromBuckets(JsonObject root, string recordId)
+    {
+        var buckets = root["buckets"]?.AsObject()
+            ?? throw new InvalidDataException("The index document does not contain buckets.");
+
+        foreach (var bucket in buckets.ToArray())
+        {
+            var recordIds = bucket.Value?.AsArray()
+                ?? throw new InvalidDataException("The index bucket is not an array.");
+            for (var index = recordIds.Count - 1; index >= 0; index--)
+            {
+                if (string.Equals(recordIds[index]?.GetValue<string>(), recordId, StringComparison.Ordinal))
+                    recordIds.RemoveAt(index);
+            }
+
+            if (recordIds.Count == 0)
+                buckets.Remove(bucket.Key);
+        }
+
+        return buckets;
     }
 
     private static byte[] EncryptLegacyPayload(ReadOnlySpan<byte> plaintext, JsonColdStoreEncryptionKey key)

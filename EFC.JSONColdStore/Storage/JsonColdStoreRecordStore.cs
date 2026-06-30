@@ -159,6 +159,14 @@ internal sealed class JsonColdStoreRecordStore
         string entityName,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        await foreach (var record in ReadAllNamedRecordsAsync(entityName, cancellationToken))
+            yield return record.Payload;
+    }
+
+    internal async IAsyncEnumerable<JsonColdStoreRecord> ReadAllNamedRecordsAsync(
+        string entityName,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
         var recordsDirectory = JsonColdStorePathValidator.GetSafeChildPath(
             _options.DatabaseDirectory,
             "entities",
@@ -171,6 +179,8 @@ internal sealed class JsonColdStoreRecordStore
         foreach (var recordPath in Directory.EnumerateFiles(recordsDirectory, "*.jcs").Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var recordId = JsonColdStoreNameEncoder.DecodePathSegment(
+                Path.GetFileNameWithoutExtension(recordPath));
             var payload = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, recordPath, cancellationToken);
             byte[] decoded;
             try
@@ -183,7 +193,7 @@ internal sealed class JsonColdStoreRecordStore
                 throw;
             }
 
-            yield return decoded;
+            yield return new JsonColdStoreRecord(recordId, decoded);
         }
     }
 
@@ -694,6 +704,8 @@ internal sealed record JsonColdStoreRecoveryResult(
     int FailedManifests,
     int DeletedOrphanedStagedWrites = 0,
     int DeletedTemporaryFiles = 0);
+
+internal sealed record JsonColdStoreRecord(string RecordId, byte[] Payload);
 
 internal sealed record JsonColdStoreStartupValidationResult(int VerifiedRecords);
 

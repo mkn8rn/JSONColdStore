@@ -510,6 +510,17 @@ public sealed class JsonColdStoreRecordStoreTests
         Assert.DoesNotContain("/", encoded);
     }
 
+    [Fact]
+    public void NameEncoderRoundTripsEncodedPathSegment()
+    {
+        var value = "spaces punctuation ..\\unsafe/name 123";
+        var encoded = JsonColdStoreNameEncoder.EncodePathSegment(value);
+
+        var decoded = JsonColdStoreNameEncoder.DecodePathSegment(encoded);
+
+        Assert.Equal(value, decoded);
+    }
+
     private static async Task WriteManifestAsync(
         string root,
         JsonColdStoreWriteManifest manifest,

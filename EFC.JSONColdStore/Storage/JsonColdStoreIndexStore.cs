@@ -117,6 +117,21 @@ internal sealed class JsonColdStoreIndexStore
             .ToArray();
     }
 
+    internal async Task<IReadOnlyDictionary<string, IReadOnlyList<string>>> ReadBucketsAsync(
+        string entityName,
+        string indexName,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(indexName))
+            throw new ArgumentException("An index name is required.", nameof(indexName));
+
+        var document = Normalize(await ReadDocumentAsync(entityName, indexName, cancellationToken));
+        return document.Buckets.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<string>)pair.Value,
+            StringComparer.Ordinal);
+    }
+
     private async Task<JsonColdStoreIndexDocument> ReadDocumentAsync(
         string entityName,
         string indexName,

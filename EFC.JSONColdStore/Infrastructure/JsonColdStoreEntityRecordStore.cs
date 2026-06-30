@@ -393,12 +393,14 @@ internal sealed class JsonColdStoreEntityRecordStore
         foreach (var descriptor in _modelDescriptor.Entities)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var currentRecords = new List<JsonColdStoreVerifiedEntityRecord>();
 
-            await foreach (var payload in _session.Records.ReadAllRecordsAsync(
+            await foreach (var record in _session.Records.ReadAllNamedRecordsAsync(
                 descriptor.EntityName,
                 cancellationToken))
             {
-                VerifyPayload(payload, descriptor.ClrType, descriptor.EntityName);
+                var entity = VerifyPayload(record.Payload, descriptor.ClrType, descriptor.EntityName);
+                currentRecords.Add(new JsonColdStoreVerifiedEntityRecord(record.RecordId, entity));
                 verifiedRecords++;
             }
 
@@ -406,11 +408,11 @@ internal sealed class JsonColdStoreEntityRecordStore
                 descriptor,
                 cancellationToken))
             {
-                VerifyPayload(legacyRecord.Payload, descriptor.ClrType, descriptor.EntityName);
+                _ = VerifyPayload(legacyRecord.Payload, descriptor.ClrType, descriptor.EntityName);
                 verifiedLegacyRecords++;
             }
 
-            verifiedIndexes += await VerifyIndexesAsync(descriptor, cancellationToken);
+            verifiedIndexes += await VerifyIndexesAsync(descriptor, currentRecords, cancellationToken);
         }
 
         return new JsonColdStoreEntityVerificationResult(
@@ -421,9 +423,13 @@ internal sealed class JsonColdStoreEntityRecordStore
 
     private async Task<int> VerifyIndexesAsync(
         JsonColdStoreEntityDescriptor descriptor,
+        IReadOnlyList<JsonColdStoreVerifiedEntityRecord> currentRecords,
         CancellationToken cancellationToken)
     {
         var verifiedIndexes = 0;
+        var currentRecordIds = currentRecords
+            .Select(record => record.RecordId)
+            .ToHashSet(StringComparer.Ordinal);
 
         foreach (var index in descriptor.Indexes)
         {
@@ -431,7 +437,7 @@ internal sealed class JsonColdStoreEntityRecordStore
 
             if (!_indexStore.DocumentExists(descriptor.EntityName, index.StorageName))
             {
-                if (_session.Records.EntityHasRecords(descriptor.EntityName))
+                if (currentRecords.Count > 0)
                 {
                     throw new InvalidOperationException(
                         $"The JSONColdStore index '{index.StorageName}' for entity '{descriptor.EntityName}' is missing. "
@@ -441,16 +447,16 @@ internal sealed class JsonColdStoreEntityRecordStore
                 continue;
             }
 
-            var recordIds = await _indexStore.ReadAllRecordIdsAsync(
+            var actualBuckets = await _indexStore.ReadBucketsAsync(
                 descriptor.EntityName,
                 index.StorageName,
                 cancellationToken);
 
-            foreach (var recordId in recordIds)
+            foreach (var recordId in actualBuckets.Values.SelectMany(recordIds => recordIds).Distinct(StringComparer.Ordinal))
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (_session.Records.RecordExists(descriptor.EntityName, recordId)
+                if (currentRecordIds.Contains(recordId)
                     || _session.LegacyRecords.RecordExists(descriptor, recordId))
                 {
                     continue;
@@ -461,13 +467,65 @@ internal sealed class JsonColdStoreEntityRecordStore
                     + $"references missing record '{recordId}'.");
             }
 
+            var expectedBuckets = CreateExpectedIndexBuckets(index, currentRecords);
+            if (!IndexBucketsEqual(expectedBuckets, actualBuckets))
+            {
+                throw new InvalidDataException(
+                    $"The JSONColdStore index '{index.StorageName}' for entity '{descriptor.EntityName}' "
+                    + "does not match current record values. Rebuild JSONColdStore indexes before verification can complete.");
+            }
+
             verifiedIndexes++;
         }
 
         return verifiedIndexes;
     }
 
-    private static void VerifyPayload(
+    private static IReadOnlyDictionary<string, IReadOnlyList<string>> CreateExpectedIndexBuckets(
+        JsonColdStoreIndexDescriptor index,
+        IReadOnlyList<JsonColdStoreVerifiedEntityRecord> currentRecords)
+    {
+        var buckets = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var record in currentRecords)
+        {
+            var indexKey = index.CreateIndexKeyFromEntity(record.Entity);
+            if (!buckets.TryGetValue(indexKey, out var recordIds))
+            {
+                recordIds = [];
+                buckets[indexKey] = recordIds;
+            }
+
+            recordIds.Add(record.RecordId);
+        }
+
+        return buckets
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value.Count > 0)
+            .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+            .ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlyList<string>)pair.Value.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+                StringComparer.Ordinal);
+    }
+
+    private static bool IndexBucketsEqual(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> expected,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> actual)
+    {
+        if (expected.Count != actual.Count)
+            return false;
+
+        foreach (var expectedBucket in expected)
+        {
+            if (!actual.TryGetValue(expectedBucket.Key, out var actualRecordIds))
+                return false;
+            if (!expectedBucket.Value.SequenceEqual(actualRecordIds, StringComparer.Ordinal))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static object VerifyPayload(
         byte[] payload,
         Type entityType,
         string entityName)
@@ -476,6 +534,8 @@ internal sealed class JsonColdStoreEntityRecordStore
         if (entity is null)
             throw new InvalidDataException(
                 $"The JSONColdStore record for '{entityName}' deserialized to null.");
+
+        return entity;
     }
 
     internal async Task DeleteEntityAsync(
@@ -774,3 +834,5 @@ internal sealed record JsonColdStoreEntityVerificationResult(
     int VerifiedRecords,
     int VerifiedLegacyRecords,
     int VerifiedIndexes);
+
+internal sealed record JsonColdStoreVerifiedEntityRecord(string RecordId, object Entity);

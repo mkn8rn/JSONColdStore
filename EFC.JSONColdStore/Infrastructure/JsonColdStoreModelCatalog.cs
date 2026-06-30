@@ -117,11 +117,19 @@ internal sealed class JsonColdStoreModelCatalog
                 $"JSONColdStore model catalog format version {stored.FormatVersion} is not supported.");
         }
 
+        if (stored.CreatedAt == default)
+            throw new InvalidDataException("The JSONColdStore model catalog creation timestamp is invalid.");
+
+        if (string.IsNullOrWhiteSpace(stored.ProviderVersion))
+            throw new InvalidDataException("The JSONColdStore model catalog provider version is required.");
+
         if (string.IsNullOrWhiteSpace(stored.ModelHash))
             throw new InvalidDataException("The JSONColdStore model catalog does not contain a model hash.");
 
         if (stored.Model is null)
             throw new InvalidDataException("The JSONColdStore model catalog does not contain a model snapshot.");
+
+        ValidateSnapshot(stored.Model);
 
         var storedModelHash = ComputeHash(stored.Model);
         if (!string.Equals(stored.ModelHash, storedModelHash, StringComparison.Ordinal))
@@ -134,6 +142,89 @@ internal sealed class JsonColdStoreModelCatalog
         {
             throw new InvalidOperationException(
                 "The configured EF model does not match the JSONColdStore model catalog for this database directory.");
+        }
+    }
+
+    private static void ValidateSnapshot(JsonColdStoreModelSnapshot snapshot)
+    {
+        if (snapshot.Entities is null)
+            throw new InvalidDataException("The JSONColdStore model catalog entity list is required.");
+
+        var entityNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entity in snapshot.Entities)
+        {
+            if (entity is null)
+                throw new InvalidDataException("The JSONColdStore model catalog contains an empty entity.");
+
+            if (string.IsNullOrWhiteSpace(entity.EntityName))
+                throw new InvalidDataException("The JSONColdStore model catalog entity name is required.");
+
+            if (!entityNames.Add(entity.EntityName))
+            {
+                throw new InvalidDataException(
+                    $"The JSONColdStore model catalog contains duplicate entity '{entity.EntityName}'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(entity.ClrTypeName))
+                throw new InvalidDataException("The JSONColdStore model catalog entity CLR type is required.");
+
+            if (entity.Key is null)
+                throw new InvalidDataException("The JSONColdStore model catalog entity key is required.");
+
+            ValidateKey(entity.Key);
+
+            if (entity.Indexes is null)
+                throw new InvalidDataException("The JSONColdStore model catalog entity index list is required.");
+
+            foreach (var index in entity.Indexes)
+                ValidateIndex(index);
+        }
+    }
+
+    private static void ValidateKey(JsonColdStoreKeySnapshot key)
+    {
+        if (string.IsNullOrWhiteSpace(key.PropertyName))
+            throw new InvalidDataException("The JSONColdStore model catalog key property name is required.");
+
+        if (string.IsNullOrWhiteSpace(key.ClrTypeName))
+            throw new InvalidDataException("The JSONColdStore model catalog key CLR type is required.");
+    }
+
+    private static void ValidateIndex(JsonColdStoreIndexSnapshot index)
+    {
+        if (index is null)
+            throw new InvalidDataException("The JSONColdStore model catalog contains an empty index.");
+
+        if (index.PropertyNames is null || index.PropertyNames.Count == 0)
+            throw new InvalidDataException("The JSONColdStore model catalog index property list is required.");
+
+        if (index.PropertyTypeNames is null)
+            throw new InvalidDataException("The JSONColdStore model catalog index property type list is required.");
+
+        if (index.PropertyTypeNames.Count != index.PropertyNames.Count)
+        {
+            throw new InvalidDataException(
+                "The JSONColdStore model catalog index property type count must match the property count.");
+        }
+
+        var propertyNames = new HashSet<string>(StringComparer.Ordinal);
+        for (var propertyIndex = 0; propertyIndex < index.PropertyNames.Count; propertyIndex++)
+        {
+            var propertyName = index.PropertyNames[propertyIndex];
+            if (string.IsNullOrWhiteSpace(propertyName))
+                throw new InvalidDataException("The JSONColdStore model catalog index property name is required.");
+
+            if (!propertyNames.Add(propertyName))
+            {
+                throw new InvalidDataException(
+                    $"The JSONColdStore model catalog contains duplicate index property '{propertyName}'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(index.PropertyTypeNames[propertyIndex]))
+            {
+                throw new InvalidDataException(
+                    "The JSONColdStore model catalog index property type name is required.");
+            }
         }
     }
 

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Runtime.CompilerServices;
 
 namespace EFC.JSONColdStore.Storage;
 
@@ -100,6 +101,27 @@ internal sealed class JsonColdStoreRecordStore
             [.. GetRecordPathSegments(entityName, recordId)]);
 
         return File.Exists(path);
+    }
+
+    internal async IAsyncEnumerable<byte[]> ReadAllRecordsAsync(
+        string entityName,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var recordsDirectory = JsonColdStorePathValidator.GetSafeChildPath(
+            _options.DatabaseDirectory,
+            "entities",
+            JsonColdStoreNameEncoder.EncodePathSegment(entityName),
+            "records");
+
+        if (!Directory.Exists(recordsDirectory))
+            yield break;
+
+        foreach (var recordPath in Directory.EnumerateFiles(recordsDirectory, "*.jcs").Order(StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var payload = await File.ReadAllBytesAsync(recordPath, cancellationToken);
+            yield return JsonColdStorePayloadCodec.Decode(payload, _options);
+        }
     }
 
     internal async Task<JsonColdStoreRecoveryResult> RecoverPendingManifestsAsync(

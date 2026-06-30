@@ -225,6 +225,45 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task ScanJsonColdStoreAsyncExplicitlyReadsAllSavedEntities()
+    {
+        var directory = TestDirectory("facade-scan-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("10000000-0000-0000-0000-000000000001"),
+                Value = "first",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("10000000-0000-0000-0000-000000000002"),
+                Value = "second",
+            });
+        context.SaveChanges();
+
+        var scanned = await context.Database.ScanJsonColdStoreAsync<WritableEntity>();
+
+        Assert.Equal(["first", "second"], scanned.Select(entity => entity.Value).Order().ToArray());
+    }
+
+    [Fact]
+    public async Task ScanJsonColdStoreAsyncReturnsEmptyForEntityWithoutRecords()
+    {
+        var directory = TestDirectory("facade-scan-empty-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+        context.Database.EnsureCreated();
+
+        var scanned = await context.Database.ScanJsonColdStoreAsync<WritableEntity>();
+
+        Assert.Empty(scanned);
+    }
+
+    [Fact]
     public void QueryThrowsClearUnsupportedMessageUntilQueryPipelineExists()
     {
         var directory = TestDirectory("query-unsupported-" + Guid.NewGuid().ToString("N"));

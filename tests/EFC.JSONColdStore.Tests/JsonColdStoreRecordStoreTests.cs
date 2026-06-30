@@ -52,6 +52,43 @@ public sealed class JsonColdStoreRecordStoreTests
     }
 
     [Fact]
+    public async Task ReadAllRecordsAsyncDecodesRecordsInStableFileOrder()
+    {
+        var root = NewTempDirectory();
+        using var key = JsonColdStoreEncryptionKey.FromBytes(new byte[32]);
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.Brotli)
+            .UseEncryptionKey(key)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+        await store.WriteRecordAsync("Entity", "2", """{"id":2}"""u8.ToArray());
+        await store.WriteRecordAsync("Entity", "1", """{"id":1}"""u8.ToArray());
+        var records = new List<string>();
+
+        await foreach (var record in store.ReadAllRecordsAsync("Entity"))
+            records.Add(Encoding.UTF8.GetString(record));
+
+        Assert.Equal(["{\"id\":1}", "{\"id\":2}"], records);
+    }
+
+    [Fact]
+    public async Task ReadAllRecordsAsyncReturnsEmptyForMissingEntityDirectory()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+        var records = new List<byte[]>();
+
+        await foreach (var record in store.ReadAllRecordsAsync("Missing"))
+            records.Add(record);
+
+        Assert.Empty(records);
+    }
+
+    [Fact]
     public async Task RecoverPendingManifestsDeletesManifestWhenTargetExists()
     {
         var root = NewTempDirectory();

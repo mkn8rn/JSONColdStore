@@ -67,6 +67,21 @@ internal sealed class JsonColdStoreEntityRecordStore
         return JsonSerializer.Deserialize<TEntity>(payload, EntityJsonOptions);
     }
 
+    internal async IAsyncEnumerable<TEntity> ScanEntitiesAsync<TEntity>(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        where TEntity : class
+    {
+        var descriptor = _modelDescriptor.FindEntity(typeof(TEntity));
+        await foreach (var payload in _session.Records.ReadAllRecordsAsync(
+            descriptor.EntityName,
+            cancellationToken))
+        {
+            var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityJsonOptions);
+            if (entity is not null)
+                yield return entity;
+        }
+    }
+
     internal async Task DeleteEntityAsync(
         object entity,
         Type entityType,

@@ -36,4 +36,34 @@ public static class JsonColdStoreDatabaseFacadeExtensions
 
         return await entityStore.ReadEntityAsync<TEntity>(keyValue, cancellationToken);
     }
+
+    /// <summary>
+    /// Explicitly scans all stored records for an entity type from JSONColdStore storage.
+    /// </summary>
+    public static async Task<IReadOnlyList<TEntity>> ScanJsonColdStoreAsync<TEntity>(
+        this DatabaseFacade database,
+        CancellationToken cancellationToken = default)
+        where TEntity : class
+    {
+        ArgumentNullException.ThrowIfNull(database);
+
+        var context = database.GetService<ICurrentDbContext>().Context;
+        var storeOptions = database.GetService<IDbContextOptions>()
+            .FindExtension<JsonColdStoreOptionsExtension>()?.Options
+            ?? throw new InvalidOperationException("JSONColdStore options are not configured.");
+
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(
+            storeOptions,
+            acquireWriterLock: false,
+            cancellationToken);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(context.Model));
+        var results = new List<TEntity>();
+
+        await foreach (var entity in entityStore.ScanEntitiesAsync<TEntity>(cancellationToken))
+            results.Add(entity);
+
+        return results;
+    }
 }

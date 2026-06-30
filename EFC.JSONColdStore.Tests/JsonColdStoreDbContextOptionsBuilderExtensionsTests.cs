@@ -142,6 +142,55 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public void EnsureDeletedReturnsFalseForEmptyDirectoryWithoutMetadata()
+    {
+        var directory = TestDirectory("ensure-deleted-empty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        Assert.False(context.Database.EnsureDeleted());
+        Assert.True(Directory.Exists(directory));
+    }
+
+    [Fact]
+    public void EnsureDeletedRejectsDirectoryWithoutStoreMetadata()
+    {
+        var directory = TestDirectory("ensure-deleted-unrelated-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var unrelatedFile = Path.Combine(directory, "unrelated.txt");
+        File.WriteAllText(unrelatedFile, "keep me");
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => context.Database.EnsureDeleted());
+
+        Assert.Contains("metadata", exception.Message);
+        Assert.True(File.Exists(unrelatedFile));
+        Assert.False(Directory.Exists(Path.Combine(directory, "_locks")));
+    }
+
+    [Fact]
+    public void EnsureDeletedRejectsInvalidStoreMetadata()
+    {
+        var directory = TestDirectory("ensure-deleted-invalid-metadata-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var storeFile = Path.Combine(directory, "_store.json");
+        File.WriteAllText(storeFile, "not json");
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        Assert.Throws<JsonException>(() => context.Database.EnsureDeleted());
+
+        Assert.True(File.Exists(storeFile));
+        Assert.True(Directory.Exists(directory));
+    }
+
+    [Fact]
     public async Task EnsureDeletedAsyncHonorsCancellation()
     {
         var directory = TestDirectory("ensure-deleted-canceled-" + Guid.NewGuid().ToString("N"));

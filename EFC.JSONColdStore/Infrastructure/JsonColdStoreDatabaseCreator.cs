@@ -36,11 +36,37 @@ internal sealed class JsonColdStoreDatabaseCreator : IDatabaseCreator
         if (!Directory.Exists(databaseDirectory))
             return false;
 
+        var storeFilePath = JsonColdStorePathValidator.GetSafeChildPath(
+            _options.DatabaseDirectory,
+            JsonColdStoreCatalog.StoreFileName);
+        if (!File.Exists(storeFilePath))
+        {
+            if (Directory.EnumerateFileSystemEntries(databaseDirectory).Any())
+            {
+                throw new InvalidOperationException(
+                    "Refusing to delete the configured directory because it does not contain JSONColdStore metadata.");
+            }
+
+            return false;
+        }
+
         var writerLock = await JsonColdStoreDatabaseLock.AcquireAsync(
                 _options,
                 cancellationToken)
             .ConfigureAwait(false);
-        writerLock.Dispose();
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!File.Exists(storeFilePath))
+                return false;
+
+            var catalog = new JsonColdStoreCatalog(_options);
+            await catalog.LoadAndValidateAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            writerLock.Dispose();
+        }
 
         cancellationToken.ThrowIfCancellationRequested();
         Directory.Delete(databaseDirectory, recursive: true);

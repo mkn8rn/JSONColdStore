@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using EFC.JSONColdStore.Infrastructure;
 
 namespace EFC.JSONColdStore.Storage;
@@ -11,12 +12,19 @@ internal sealed class JsonColdStoreLegacyRecordStore
     private const int NonceLength = 12;
     private const int TagLength = 16;
     private const int MinimumEncryptedEnvelopeLength = 1 + NonceLength + TagLength;
+    private const string SharedRowsFileName = "_rows.json";
 
     private static readonly byte[] Utf8Bom = [0xEF, 0xBB, 0xBF];
 
     private static readonly JsonSerializerOptions IndexJsonOptions = new()
     {
         WriteIndented = true,
+    };
+
+    private static readonly JsonSerializerOptions SharedRowsJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter() },
     };
 
     private readonly JsonColdStoreOptions _options;
@@ -56,6 +64,18 @@ internal sealed class JsonColdStoreLegacyRecordStore
     {
         ArgumentNullException.ThrowIfNull(descriptor);
 
+        if (descriptor.IsSharedType)
+        {
+            await foreach (var row in ReadAllSharedRowsAsync(
+                descriptor,
+                cancellationToken))
+            {
+                yield return new JsonColdStoreLegacyRecord(row.RecordId, row.Payload);
+            }
+
+            yield break;
+        }
+
         var entityDirectory = GetEntityDirectory(descriptor);
         if (!Directory.Exists(entityDirectory))
             yield break;
@@ -75,6 +95,47 @@ internal sealed class JsonColdStoreLegacyRecordStore
             yield return new JsonColdStoreLegacyRecord(
                 recordId,
                 Decode(bytes));
+        }
+    }
+
+    internal bool SharedRowsDocumentExists(JsonColdStoreEntityDescriptor descriptor)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+        return descriptor.IsSharedType && File.Exists(GetSharedRowsPath(descriptor));
+    }
+
+    internal async IAsyncEnumerable<JsonColdStoreLegacySharedRow> ReadAllSharedRowsAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+        if (!descriptor.IsSharedType)
+            yield break;
+
+        var rowsPath = GetSharedRowsPath(descriptor);
+        if (!File.Exists(rowsPath))
+            yield break;
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, rowsPath, cancellationToken);
+        var payload = Decode(bytes);
+
+        using var document = JsonDocument.Parse(payload);
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException(
+                $"The legacy JSONColdStore shared rows document for '{descriptor.EntityName}' must be a JSON array.");
+        }
+
+        var rowIndex = 0;
+        foreach (var row in document.RootElement.EnumerateArray())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            rowIndex++;
+            var entity = CreateSharedRowEntity(descriptor, row, rowIndex);
+            var recordId = descriptor.CreateRecordIdFromEntity(entity);
+            var normalizedPayload = JsonSerializer.SerializeToUtf8Bytes(entity, SharedRowsJsonOptions);
+            yield return new JsonColdStoreLegacySharedRow(recordId, entity, normalizedPayload);
         }
     }
 
@@ -135,6 +196,126 @@ internal sealed class JsonColdStoreLegacyRecordStore
         var recordPath = GetRecordPath(descriptor, recordId);
         if (File.Exists(recordPath))
             File.Delete(recordPath);
+    }
+
+    internal void DeleteSharedRowsIfExists(JsonColdStoreEntityDescriptor descriptor)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+        if (!descriptor.IsSharedType)
+            return;
+
+        var rowsPath = GetSharedRowsPath(descriptor);
+        if (File.Exists(rowsPath))
+            File.Delete(rowsPath);
+    }
+
+    private static Dictionary<string, object?> CreateSharedRowEntity(
+        JsonColdStoreEntityDescriptor descriptor,
+        JsonElement row,
+        int rowIndex)
+    {
+        if (row.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException(
+                $"Legacy JSONColdStore shared row {rowIndex} for '{descriptor.EntityName}' must be a JSON object.");
+        }
+
+        var entity = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var property in descriptor.Properties)
+        {
+            if (!TryGetSharedRowProperty(row, property.Name, out var value))
+            {
+                throw new InvalidDataException(
+                    $"Legacy JSONColdStore shared row {rowIndex} for '{descriptor.EntityName}' is missing '{property.Name}'.");
+            }
+
+            entity[property.Name] = ConvertSharedRowValue(
+                value,
+                property.ClrType,
+                descriptor.EntityName,
+                property.Name,
+                rowIndex);
+        }
+
+        return entity;
+    }
+
+    private static bool TryGetSharedRowProperty(JsonElement row, string propertyName, out JsonElement value)
+    {
+        if (row.TryGetProperty(propertyName, out value))
+            return true;
+
+        foreach (var property in row.EnumerateObject())
+        {
+            if (string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static object? ConvertSharedRowValue(
+        JsonElement value,
+        Type propertyType,
+        string entityName,
+        string propertyName,
+        int rowIndex)
+    {
+        var targetType = Nullable.GetUnderlyingType(propertyType) ?? propertyType;
+        if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            if (Nullable.GetUnderlyingType(propertyType) is not null || !propertyType.IsValueType)
+                return null;
+
+            throw new InvalidDataException(
+                $"Legacy JSONColdStore shared row {rowIndex} for '{entityName}' has null for non-null '{propertyName}'.");
+        }
+
+        try
+        {
+            if (targetType == typeof(string))
+                return value.GetString();
+
+            if (targetType == typeof(Guid))
+            {
+                return value.ValueKind == JsonValueKind.String
+                    ? value.GetGuid()
+                    : JsonSerializer.Deserialize<Guid>(value.GetRawText(), SharedRowsJsonOptions);
+            }
+
+            if (targetType == typeof(DateTime))
+            {
+                return value.ValueKind == JsonValueKind.String
+                    ? value.GetDateTime()
+                    : JsonSerializer.Deserialize<DateTime>(value.GetRawText(), SharedRowsJsonOptions);
+            }
+
+            if (targetType == typeof(DateTimeOffset))
+            {
+                return value.ValueKind == JsonValueKind.String
+                    ? value.GetDateTimeOffset()
+                    : JsonSerializer.Deserialize<DateTimeOffset>(value.GetRawText(), SharedRowsJsonOptions);
+            }
+
+            if (targetType.IsEnum)
+            {
+                return value.ValueKind == JsonValueKind.String
+                    ? Enum.Parse(targetType, value.GetString()!, ignoreCase: true)
+                    : Enum.ToObject(targetType, value.GetInt32());
+            }
+
+            return JsonSerializer.Deserialize(value.GetRawText(), targetType, SharedRowsJsonOptions);
+        }
+        catch (Exception ex) when (ex is ArgumentException or FormatException or InvalidOperationException or JsonException)
+        {
+            throw new InvalidDataException(
+                $"Legacy JSONColdStore shared row {rowIndex} for '{entityName}' has invalid '{propertyName}'.",
+                ex);
+        }
     }
 
     private async Task<JsonColdStoreLegacyIndexLookup?> TryReadKeyScopedIndexAsync(
@@ -261,15 +442,33 @@ internal sealed class JsonColdStoreLegacyRecordStore
 
         return JsonColdStorePathValidator.GetSafeChildPath(
             _options.DatabaseDirectory,
-            descriptor.ClrType.Name,
+            GetLegacyEntityDirectoryName(descriptor),
             recordId + ".json");
     }
 
     private string GetEntityDirectory(JsonColdStoreEntityDescriptor descriptor) =>
-        JsonColdStorePathValidator.GetSafeChildPath(_options.DatabaseDirectory, descriptor.ClrType.Name);
+        JsonColdStorePathValidator.GetSafeChildPath(
+            _options.DatabaseDirectory,
+            GetLegacyEntityDirectoryName(descriptor));
+
+    private string GetSharedRowsPath(JsonColdStoreEntityDescriptor descriptor) =>
+        JsonColdStorePathValidator.GetSafeChildPath(
+            _options.DatabaseDirectory,
+            descriptor.EntityName,
+            SharedRowsFileName);
+
+    private static string GetLegacyEntityDirectoryName(JsonColdStoreEntityDescriptor descriptor) =>
+        descriptor.IsSharedType
+            ? descriptor.EntityName
+            : descriptor.ClrType.Name;
 }
 
 internal sealed record JsonColdStoreLegacyRecord(string RecordId, byte[] Payload);
+
+internal sealed record JsonColdStoreLegacySharedRow(
+    string RecordId,
+    IReadOnlyDictionary<string, object?> Entity,
+    byte[] Payload);
 
 internal sealed record JsonColdStoreLegacyIndexLookup(bool UseIndex, IReadOnlyList<string> RecordIds)
 {

@@ -329,6 +329,61 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task EnsureCreatedImportsEncryptedLegacySharedJoinRowsIntoCurrentStore()
+    {
+        var directory = TestDirectory("ensure-created-imports-legacy-join-" + Guid.NewGuid().ToString("N"));
+        var postId = Guid.Parse("62000000-0000-0000-0000-000000000011");
+        var tagId = Guid.Parse("62000000-0000-0000-0000-000000000012");
+        using var key = JsonColdStoreEncryptionKey.FromBytes(
+            Enumerable.Range(1, 32).Select(value => (byte)value).ToArray());
+        await WriteLegacyEntityAsync(
+            directory,
+            new ManyToManyPost { Id = postId },
+            postId,
+            key);
+        await WriteLegacyEntityAsync(
+            directory,
+            new ManyToManyTag { Id = tagId },
+            tagId,
+            key);
+        var rowsPath = await WriteLegacySharedRowsAsync(
+            directory,
+            "ManyToManyPostTag",
+            [
+                new Dictionary<string, Guid>
+                {
+                    ["PostId"] = postId,
+                    ["TagId"] = tagId,
+                },
+            ],
+            key);
+        var builder = new DbContextOptionsBuilder<ManyToManyDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseEncryptionKey(key)
+                .UseFsyncOnWrite(false));
+        using var context = new ManyToManyDbContext(builder.Options);
+
+        Assert.True(context.Database.EnsureCreated());
+
+        var modelDescriptor = JsonColdStoreModelDescriptor.Create(context.Model);
+        var sharedDescriptor = Assert.Single(modelDescriptor.Entities, entity => entity.IsSharedType);
+        var sharedRecordId = sharedDescriptor.CreateRecordIdFromEntity(
+            new Dictionary<string, object?>
+            {
+                ["PostId"] = postId,
+                ["TagId"] = tagId,
+            });
+        var verification = await context.Database.VerifyJsonColdStoreAsync();
+
+        Assert.False(File.Exists(rowsPath));
+        Assert.True(File.Exists(CurrentRecordPath(directory, sharedDescriptor.EntityName, sharedRecordId)));
+        Assert.Equal(3, verification.VerifiedRecords);
+        Assert.Equal(0, verification.VerifiedLegacyRecords);
+    }
+
+    [Fact]
     public async Task EnsureDeletedAsyncRemovesCreatedStore()
     {
         var directory = TestDirectory("ensure-deleted-" + Guid.NewGuid().ToString("N"));
@@ -2849,18 +2904,34 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
             JsonColdStoreNameEncoder.EncodePathSegment(propertyName) + ".json");
 
     private static string CurrentRecordPath(string directory, Guid id) =>
+        CurrentRecordPath(
+            directory,
+            typeof(WritableEntity).FullName!,
+            id.ToString());
+
+    private static string CurrentRecordPath(string directory, string entityName, string recordId) =>
         JsonColdStorePathValidator.GetSafeChildPath(
             directory,
             [.. JsonColdStoreRecordStore.GetRecordPathSegments(
-                typeof(WritableEntity).FullName!,
-                id.ToString())]);
+                entityName,
+                recordId)]);
 
     private static async Task WriteLegacyEntityAsync(
         string directory,
         WritableEntity entity,
         JsonColdStoreEncryptionKey? key = null)
     {
-        await WriteLegacyEntityFileAsync(directory, $"{entity.Id}.json", entity, key);
+        await WriteLegacyEntityAsync(directory, entity, entity.Id, key);
+    }
+
+    private static async Task WriteLegacyEntityAsync<TEntity>(
+        string directory,
+        TEntity entity,
+        Guid id,
+        JsonColdStoreEncryptionKey? key = null)
+        where TEntity : class
+    {
+        await WriteLegacyEntityFileAsync(directory, typeof(TEntity).Name, $"{id}.json", entity, key);
     }
 
     private static async Task WriteLegacyEntityFileAsync(
@@ -2869,7 +2940,18 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         WritableEntity entity,
         JsonColdStoreEncryptionKey? key = null)
     {
-        var entityDirectory = Path.Combine(directory, nameof(WritableEntity));
+        await WriteLegacyEntityFileAsync(directory, nameof(WritableEntity), fileName, entity, key);
+    }
+
+    private static async Task WriteLegacyEntityFileAsync<TEntity>(
+        string directory,
+        string legacyEntityDirectoryName,
+        string fileName,
+        TEntity entity,
+        JsonColdStoreEncryptionKey? key = null)
+        where TEntity : class
+    {
+        var entityDirectory = Path.Combine(directory, legacyEntityDirectoryName);
         Directory.CreateDirectory(entityDirectory);
         var json = JsonSerializer.Serialize(
             entity,
@@ -2879,6 +2961,26 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
             bytes = EncryptLegacyPayload(bytes, key);
 
         await File.WriteAllBytesAsync(Path.Combine(entityDirectory, fileName), bytes);
+    }
+
+    private static async Task<string> WriteLegacySharedRowsAsync(
+        string directory,
+        string sharedEntityName,
+        IEnumerable<Dictionary<string, Guid>> rows,
+        JsonColdStoreEncryptionKey? key = null)
+    {
+        var entityDirectory = Path.Combine(directory, sharedEntityName);
+        Directory.CreateDirectory(entityDirectory);
+        var json = JsonSerializer.Serialize(
+            rows,
+            new JsonSerializerOptions { WriteIndented = true });
+        var bytes = Encoding.UTF8.GetBytes(json);
+        if (key is not null)
+            bytes = EncryptLegacyPayload(bytes, key);
+
+        var rowsPath = Path.Combine(entityDirectory, "_rows.json");
+        await File.WriteAllBytesAsync(rowsPath, bytes);
+        return rowsPath;
     }
 
     private static async Task WriteLegacyIndexAsync(
@@ -3108,7 +3210,23 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
             modelBuilder.Entity<ManyToManyTag>().HasKey(value => value.Id);
             modelBuilder.Entity<ManyToManyPost>()
                 .HasMany(value => value.Tags)
-                .WithMany(value => value.Posts);
+                .WithMany(value => value.Posts)
+                .UsingEntity<Dictionary<string, object>>(
+                    "ManyToManyPostTag",
+                    right => right
+                        .HasOne<ManyToManyTag>()
+                        .WithMany()
+                        .HasForeignKey("TagId"),
+                    left => left
+                        .HasOne<ManyToManyPost>()
+                        .WithMany()
+                        .HasForeignKey("PostId"),
+                    join =>
+                    {
+                        join.IndexerProperty<Guid>("PostId");
+                        join.IndexerProperty<Guid>("TagId");
+                        join.HasKey("PostId", "TagId");
+                    });
         }
     }
 

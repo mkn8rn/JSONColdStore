@@ -414,7 +414,7 @@ internal sealed class JsonColdStoreEntityRecordStore
         CancellationToken cancellationToken)
     {
         if (descriptor.IsSharedType)
-            return 0;
+            return await ImportLegacySharedRowsAsync(descriptor, cancellationToken);
 
         var currentRecordIds = new HashSet<string>(StringComparer.Ordinal);
         await foreach (var record in _session.Records.ReadAllNamedRecordsAsync(
@@ -467,6 +467,49 @@ internal sealed class JsonColdStoreEntityRecordStore
             imported++;
         }
 
+        return imported;
+    }
+
+    private async Task<int> ImportLegacySharedRowsAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        CancellationToken cancellationToken)
+    {
+        if (!_session.LegacyRecords.SharedRowsDocumentExists(descriptor))
+            return 0;
+
+        var currentRecordIds = new HashSet<string>(StringComparer.Ordinal);
+        await foreach (var record in _session.Records.ReadAllNamedRecordsAsync(
+            descriptor.EntityName,
+            cancellationToken))
+        {
+            currentRecordIds.Add(record.RecordId);
+        }
+
+        var legacyRows = new List<JsonColdStoreLegacySharedRow>();
+        await foreach (var legacyRow in _session.LegacyRecords.ReadAllSharedRowsAsync(
+            descriptor,
+            cancellationToken))
+        {
+            legacyRows.Add(legacyRow);
+        }
+
+        var imported = 0;
+        foreach (var legacyRow in legacyRows)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (currentRecordIds.Contains(legacyRow.RecordId))
+                continue;
+
+            await WriteEntityAsync(
+                legacyRow.Entity,
+                descriptor,
+                ignoredRecordIds: null,
+                cancellationToken);
+            currentRecordIds.Add(legacyRow.RecordId);
+            imported++;
+        }
+
+        _session.LegacyRecords.DeleteSharedRowsIfExists(descriptor);
         return imported;
     }
 

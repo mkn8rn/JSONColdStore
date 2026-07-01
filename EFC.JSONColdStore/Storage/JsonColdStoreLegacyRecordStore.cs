@@ -29,7 +29,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
     internal bool RecordExists(JsonColdStoreEntityDescriptor descriptor, string recordId)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
-        if (!IsSafeLegacyRecordId(recordId))
+        if (!JsonColdStoreLegacyRecordNames.IsSafeRecordId(recordId))
             return false;
 
         return File.Exists(GetRecordPath(descriptor, recordId));
@@ -64,13 +64,12 @@ internal sealed class JsonColdStoreLegacyRecordStore
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var fileName = Path.GetFileName(file);
-            if (fileName.StartsWith('_'))
+            if (!JsonColdStoreLegacyRecordNames.TryGetRecordIdFromFileName(
+                    Path.GetFileName(file),
+                    out var recordId))
+            {
                 continue;
-
-            var recordId = Path.GetFileNameWithoutExtension(fileName);
-            if (!IsSafeLegacyRecordId(recordId))
-                continue;
+            }
 
             var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, file, cancellationToken);
             yield return new JsonColdStoreLegacyRecord(
@@ -130,7 +129,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
     internal void DeleteRecordIfExists(JsonColdStoreEntityDescriptor descriptor, string recordId)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
-        if (!IsSafeLegacyRecordId(recordId))
+        if (!JsonColdStoreLegacyRecordNames.IsSafeRecordId(recordId))
             return;
 
         var recordPath = GetRecordPath(descriptor, recordId);
@@ -190,7 +189,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
         var safeRecordIds = new List<string>();
         foreach (var recordId in recordIds)
         {
-            if (!IsSafeLegacyRecordId(recordId))
+            if (!JsonColdStoreLegacyRecordNames.IsSafeRecordId(recordId))
                 return JsonColdStoreLegacyIndexLookup.FallbackToScan;
 
             safeRecordIds.Add(recordId);
@@ -201,24 +200,8 @@ internal sealed class JsonColdStoreLegacyRecordStore
 
     private static void ValidateLegacyRecordId(string recordId)
     {
-        if (!IsSafeLegacyRecordId(recordId))
+        if (!JsonColdStoreLegacyRecordNames.IsSafeRecordId(recordId))
             throw new InvalidDataException("The legacy JSONColdStore record id is not a safe file name.");
-    }
-
-    private static bool IsSafeLegacyRecordId(string? recordId)
-    {
-        if (string.IsNullOrWhiteSpace(recordId))
-            return false;
-        if (recordId is "." or "..")
-            return false;
-        if (recordId.StartsWith('_'))
-            return false;
-        if (recordId.Contains('\\') || recordId.Contains('/'))
-            return false;
-        if (recordId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-            return false;
-
-        return string.Equals(Path.GetFileName(recordId), recordId, StringComparison.Ordinal);
     }
 
     private byte[] Decode(ReadOnlySpan<byte> bytes)

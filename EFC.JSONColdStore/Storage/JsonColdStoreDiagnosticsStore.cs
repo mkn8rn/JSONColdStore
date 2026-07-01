@@ -124,27 +124,7 @@ internal sealed class JsonColdStoreDiagnosticsStore
             return 0;
 
         return Directory.EnumerateFiles(legacyDirectory, "*.json")
-            .Count(IsSafeLegacyRecordFile);
-    }
-
-    private static bool IsSafeLegacyRecordFile(string path)
-    {
-        var fileName = Path.GetFileName(path);
-        if (fileName.StartsWith('_'))
-            return false;
-
-        var recordId = Path.GetFileNameWithoutExtension(fileName);
-        if (string.IsNullOrWhiteSpace(recordId))
-            return false;
-        if (recordId is "." or "..")
-            return false;
-        if (recordId.StartsWith('_'))
-            return false;
-        if (recordId.Contains('\\') || recordId.Contains('/'))
-            return false;
-
-        return !string.Equals(recordId, JsonColdStoreCatalog.StoreFileName, StringComparison.Ordinal)
-            && !string.Equals(recordId, JsonColdStoreModelCatalog.ModelFileName, StringComparison.Ordinal);
+            .Count(JsonColdStoreLegacyRecordNames.IsSafeRecordFile);
     }
 
     private int CountFiles(params string[] pathSegmentsAndPattern)

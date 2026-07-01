@@ -1328,6 +1328,45 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task GetJsonColdStoreDiagnosticsAsyncReportsProtectedMetadataWithoutKey()
+    {
+        var directory = TestDirectory("diagnostics-protected-metadata-no-key-" + Guid.NewGuid().ToString("N"));
+        using (var key = JsonColdStoreEncryptionKey.FromBytes(new byte[32]))
+        {
+            var encryptedBuilder = new DbContextOptionsBuilder<WritableDbContext>();
+            encryptedBuilder.UseJsonColdStoreDatabase(
+                directory,
+                store => store
+                    .UseFsyncOnWrite(false)
+                    .UseEncryptionKey(key));
+            using var encryptedContext = new WritableDbContext(encryptedBuilder.Options);
+            encryptedContext.Entities.Add(new WritableEntity
+            {
+                Id = Guid.Parse("53000000-0000-0000-0000-000000000003"),
+                Value = "protected diagnostic payload",
+                Score = 55,
+            });
+            encryptedContext.SaveChanges();
+        }
+
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        var diagnostics = await context.Database.GetJsonColdStoreDiagnosticsAsync();
+        var serialized = JsonSerializer.Serialize(diagnostics);
+
+        Assert.True(diagnostics.HasStoreMetadata);
+        Assert.False(diagnostics.StoreMetadataReadable);
+        Assert.True(diagnostics.StoreMetadataProtected);
+        Assert.True(diagnostics.EncryptionEnabled);
+        Assert.Null(diagnostics.StoreId);
+        Assert.Equal(1, diagnostics.RecordFileCount);
+        Assert.Equal(2, diagnostics.IndexFileCount);
+        Assert.DoesNotContain("protected diagnostic payload", serialized, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GetJsonColdStoreDiagnosticsAsyncCountsLegacyRecordsWithoutCreatingMetadata()
     {
         var directory = TestDirectory("diagnostics-legacy-" + Guid.NewGuid().ToString("N"));

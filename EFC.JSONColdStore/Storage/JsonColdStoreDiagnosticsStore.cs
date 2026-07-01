@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.Json;
 using EFC.JSONColdStore.Infrastructure;
 
 namespace EFC.JSONColdStore.Storage;
@@ -18,19 +20,23 @@ internal sealed class JsonColdStoreDiagnosticsStore
     internal async Task<JsonColdStoreDiagnosticsResult> ReadAsync(
         CancellationToken cancellationToken = default)
     {
-        var metadata = await TryReadMetadataAsync(cancellationToken).ConfigureAwait(false);
+        var metadataDiagnostics = await TryReadMetadataAsync(cancellationToken).ConfigureAwait(false);
+        var metadata = metadataDiagnostics.Metadata;
         var entityDiagnostics = _modelDescriptor.Entities
             .Select(CreateEntityDiagnostics)
             .ToArray();
 
         return new JsonColdStoreDiagnosticsResult
         {
-            HasStoreMetadata = metadata is not null,
+            HasStoreMetadata = metadataDiagnostics.Exists,
+            StoreMetadataReadable = metadata is not null,
+            StoreMetadataProtected = metadataDiagnostics.Protected,
             StoreId = metadata?.StoreId,
             FormatVersion = metadata?.FormatVersion,
             ProviderVersion = metadata?.ProviderVersion,
             Compression = metadata?.Policy.Compression ?? _options.Compression,
-            EncryptionEnabled = metadata?.Policy.EncryptionEnabled ?? _options.Encryption is not null,
+            EncryptionEnabled = metadata?.Policy.EncryptionEnabled
+                ?? (metadataDiagnostics.Protected || _options.Encryption is not null),
             IntegrityChecksumsEnabled = _options.Integrity.EnableChecksums,
             KeyedIntegrityEnabled = _options.Integrity.Key is not null,
             StartupMode = metadata?.Policy.StartupMode ?? _options.StartupMode,
@@ -50,18 +56,42 @@ internal sealed class JsonColdStoreDiagnosticsStore
         };
     }
 
-    private async Task<JsonColdStoreStoreMetadata?> TryReadMetadataAsync(
+    private async Task<JsonColdStoreMetadataDiagnostics> TryReadMetadataAsync(
         CancellationToken cancellationToken)
     {
         var storePath = JsonColdStorePathValidator.GetSafeChildPath(
             _options.DatabaseDirectory,
             JsonColdStoreCatalog.StoreFileName);
         if (!File.Exists(storePath))
-            return null;
+            return new JsonColdStoreMetadataDiagnostics(false, false, null);
 
-        var catalog = new JsonColdStoreCatalog(_options);
-        return await catalog.LoadAndValidateAsync(cancellationToken).ConfigureAwait(false);
+        var protectedMetadata = false;
+        try
+        {
+            var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(
+                _options,
+                storePath,
+                cancellationToken).ConfigureAwait(false);
+            protectedMetadata = JsonColdStorePayloadCodec.IsEnvelope(bytes);
+
+            var catalog = new JsonColdStoreCatalog(_options);
+            var metadata = await catalog.LoadAndValidateAsync(cancellationToken).ConfigureAwait(false);
+            return new JsonColdStoreMetadataDiagnostics(true, protectedMetadata, metadata);
+        }
+        catch (Exception ex) when (IsMetadataDiagnosticReadFailure(ex))
+        {
+            return new JsonColdStoreMetadataDiagnostics(true, protectedMetadata, null);
+        }
     }
+
+    private static bool IsMetadataDiagnosticReadFailure(Exception exception) =>
+        exception is IOException
+            or UnauthorizedAccessException
+            or JsonException
+            or InvalidDataException
+            or NotSupportedException
+            or InvalidOperationException
+            or CryptographicException;
 
     private JsonColdStoreEntityDiagnostics CreateEntityDiagnostics(
         JsonColdStoreEntityDescriptor descriptor)
@@ -142,4 +172,9 @@ internal sealed class JsonColdStoreDiagnosticsStore
 
         return count;
     }
+
+    private sealed record JsonColdStoreMetadataDiagnostics(
+        bool Exists,
+        bool Protected,
+        JsonColdStoreStoreMetadata? Metadata);
 }

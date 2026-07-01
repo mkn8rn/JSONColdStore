@@ -8,6 +8,12 @@ public sealed record JsonColdStoreDiagnosticsResult
     /// <summary>Whether the root metadata document exists.</summary>
     public bool HasStoreMetadata { get; init; }
 
+    /// <summary>Whether the root metadata document exists and could be read with current options.</summary>
+    public bool StoreMetadataReadable { get; init; }
+
+    /// <summary>Whether the root metadata document appears to be protected by a JSONColdStore envelope.</summary>
+    public bool StoreMetadataProtected { get; init; }
+
     /// <summary>Store identifier from root metadata, or <see langword="null"/> when metadata is absent.</summary>
     public Guid? StoreId { get; init; }
 

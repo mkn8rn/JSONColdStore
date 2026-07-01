@@ -14,6 +14,7 @@ internal sealed class JsonColdStoreRecordStore
     };
 
     private readonly JsonColdStoreOptions _options;
+    private readonly JsonColdStoreOptions _writeOptions;
     private readonly bool _protectManifests;
     private readonly bool _allowStorageMutations;
     private readonly JsonColdStoreEventLog _eventLog;
@@ -21,9 +22,13 @@ internal sealed class JsonColdStoreRecordStore
     internal JsonColdStoreRecordStore(
         JsonColdStoreOptions options,
         bool protectManifests = false,
-        bool allowStorageMutations = true)
+        bool allowStorageMutations = true,
+        bool protectRecordPayloads = true)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _writeOptions = protectRecordPayloads
+            ? _options
+            : _options with { Encryption = null };
         _protectManifests = protectManifests;
         _allowStorageMutations = allowStorageMutations;
         _eventLog = new JsonColdStoreEventLog(options, protectManifests);
@@ -38,7 +43,7 @@ internal sealed class JsonColdStoreRecordStore
         RequireStorageMutations();
 
         var recordPath = GetRecordPathSegments(entityName, recordId);
-        var payload = JsonColdStorePayloadCodec.Encode(utf8Json.Span, _options);
+        var payload = JsonColdStorePayloadCodec.Encode(utf8Json.Span, _writeOptions);
         var manifest = JsonColdStoreWriteManifest.CreateStagedWrite(recordPath, payload.Length);
         var manifestPath = GetPendingManifestPathSegments(manifest.ManifestId);
         var manifestBytes = EncodeManifest(manifest);

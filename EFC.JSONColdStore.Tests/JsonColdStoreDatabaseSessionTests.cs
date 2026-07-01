@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using EFC.JSONColdStore;
 using EFC.JSONColdStore.Storage;
@@ -260,6 +261,44 @@ public sealed class JsonColdStoreDatabaseSessionTests
 
         Assert.True(store.RecordExists("Entity", "1"));
         Assert.False(Directory.Exists(Path.Combine(root, "_quarantine", "records")));
+    }
+
+    [Fact]
+    public async Task OpenAsyncUsesPlaintextRecordWritesWhenExistingStorePolicyIsPlaintext()
+    {
+        var root = NewTempDirectory();
+        var plainOptions = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .Build();
+        await new JsonColdStoreCatalog(plainOptions).EnsureInitializedAsync();
+        using var key = JsonColdStoreEncryptionKey.FromBytes(new byte[32]);
+        var encryptedOptions = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseEncryptionKey(key)
+            .UseFsyncOnWrite(false)
+            .Build();
+
+        await using (var session = await JsonColdStoreDatabaseSession.OpenAsync(encryptedOptions))
+        {
+            Assert.False(session.Metadata.Policy.EncryptionEnabled);
+            await session.Records.WriteRecordAsync(
+                "Entity",
+                "1",
+                """{"value":"policy-plain"}"""u8.ToArray());
+        }
+
+        var recordPath = JsonColdStorePathValidator.GetSafeChildPath(
+            root,
+            [.. JsonColdStoreRecordStore.GetRecordPathSegments("Entity", "1")]);
+        var recordText = Encoding.UTF8.GetString(await File.ReadAllBytesAsync(recordPath));
+        await using var readSession = await JsonColdStoreDatabaseSession.OpenAsync(
+            plainOptions,
+            acquireWriterLock: false);
+        var read = await readSession.Records.ReadRecordAsync("Entity", "1");
+
+        Assert.Contains("policy-plain", recordText);
+        Assert.Equal("""{"value":"policy-plain"}"""u8.ToArray(), read);
     }
 
     [Fact]

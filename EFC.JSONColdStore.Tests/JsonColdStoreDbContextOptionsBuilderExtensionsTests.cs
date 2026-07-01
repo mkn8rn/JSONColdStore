@@ -1051,6 +1051,30 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task VerifyJsonColdStoreAsyncAcceptsIndexesRebuiltFromLegacyRecords()
+    {
+        var directory = TestDirectory("verify-rebuilt-legacy-index-" + Guid.NewGuid().ToString("N"));
+        var id = Guid.Parse("51000000-0000-0000-0000-000000000008");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = id,
+            Value = "legacy-rebuilt",
+            Score = 12,
+        });
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var rebuilt = await context.Database.RebuildJsonColdStoreIndexesAsync<WritableEntity>();
+        var result = await context.Database.VerifyJsonColdStoreAsync();
+
+        Assert.Equal(1, rebuilt);
+        Assert.Equal(0, result.VerifiedRecords);
+        Assert.Equal(1, result.VerifiedLegacyRecords);
+        Assert.Equal(2, result.VerifiedIndexes);
+    }
+
+    [Fact]
     public async Task VerifyJsonColdStoreAsyncUsesConfiguredKeyForEncryptedLegacyRecords()
     {
         var directory = TestDirectory("verify-encrypted-legacy-" + Guid.NewGuid().ToString("N"));

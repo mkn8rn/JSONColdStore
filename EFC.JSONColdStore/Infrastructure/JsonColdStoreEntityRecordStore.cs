@@ -390,13 +390,18 @@ internal sealed class JsonColdStoreEntityRecordStore
         {
             cancellationToken.ThrowIfCancellationRequested();
             var currentRecords = new List<JsonColdStoreVerifiedEntityRecord>();
+            var indexRecords = new List<JsonColdStoreVerifiedEntityRecord>();
+            var currentRecordIds = new HashSet<string>(StringComparer.Ordinal);
 
             await foreach (var record in _session.Records.ReadAllNamedRecordsAsync(
                 descriptor.EntityName,
                 cancellationToken))
             {
                 var entity = VerifyPayload(record.Payload, descriptor.ClrType, descriptor.EntityName);
-                currentRecords.Add(new JsonColdStoreVerifiedEntityRecord(record.RecordId, entity));
+                var verifiedRecord = new JsonColdStoreVerifiedEntityRecord(record.RecordId, entity);
+                currentRecords.Add(verifiedRecord);
+                indexRecords.Add(verifiedRecord);
+                currentRecordIds.Add(record.RecordId);
                 verifiedRecords++;
             }
 
@@ -404,11 +409,18 @@ internal sealed class JsonColdStoreEntityRecordStore
                 descriptor,
                 cancellationToken))
             {
-                _ = VerifyPayload(legacyRecord.Payload, descriptor.ClrType, descriptor.EntityName);
+                var entity = VerifyPayload(legacyRecord.Payload, descriptor.ClrType, descriptor.EntityName);
+                if (!currentRecordIds.Contains(legacyRecord.RecordId))
+                    indexRecords.Add(new JsonColdStoreVerifiedEntityRecord(legacyRecord.RecordId, entity));
+
                 verifiedLegacyRecords++;
             }
 
-            verifiedIndexes += await VerifyIndexesAsync(descriptor, currentRecords, cancellationToken);
+            verifiedIndexes += await VerifyIndexesAsync(
+                descriptor,
+                indexRecords,
+                requireCurrentIndexes: currentRecords.Count > 0,
+                cancellationToken);
         }
 
         return new JsonColdStoreEntityVerificationResult(
@@ -419,11 +431,12 @@ internal sealed class JsonColdStoreEntityRecordStore
 
     private async Task<int> VerifyIndexesAsync(
         JsonColdStoreEntityDescriptor descriptor,
-        IReadOnlyList<JsonColdStoreVerifiedEntityRecord> currentRecords,
+        IReadOnlyList<JsonColdStoreVerifiedEntityRecord> indexRecords,
+        bool requireCurrentIndexes,
         CancellationToken cancellationToken)
     {
         var verifiedIndexes = 0;
-        var currentRecordIds = currentRecords
+        var indexedRecordIds = indexRecords
             .Select(record => record.RecordId)
             .ToHashSet(StringComparer.Ordinal);
 
@@ -433,7 +446,7 @@ internal sealed class JsonColdStoreEntityRecordStore
 
             if (!_indexStore.DocumentExists(descriptor.EntityName, index.StorageName))
             {
-                if (currentRecords.Count > 0)
+                if (requireCurrentIndexes)
                 {
                     throw new InvalidOperationException(
                         $"The JSONColdStore index '{index.StorageName}' for entity '{descriptor.EntityName}' is missing. "
@@ -452,18 +465,15 @@ internal sealed class JsonColdStoreEntityRecordStore
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (currentRecordIds.Contains(recordId)
-                    || _session.LegacyRecords.RecordExists(descriptor, recordId))
-                {
+                if (indexedRecordIds.Contains(recordId))
                     continue;
-                }
 
                 throw new InvalidDataException(
                     $"The JSONColdStore index '{index.StorageName}' for entity '{descriptor.EntityName}' "
                     + $"references missing record '{recordId}'.");
             }
 
-            var expectedBuckets = CreateExpectedIndexBuckets(index, currentRecords);
+            var expectedBuckets = CreateExpectedIndexBuckets(index, indexRecords);
             if (!IndexBucketsEqual(expectedBuckets, actualBuckets))
             {
                 throw new InvalidDataException(

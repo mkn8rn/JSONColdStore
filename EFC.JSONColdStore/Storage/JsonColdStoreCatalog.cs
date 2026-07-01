@@ -52,8 +52,9 @@ internal sealed class JsonColdStoreCatalog
             _options,
             GetStoreFilePath(),
             cancellationToken);
+        var json = DecodeMetadata(bytes);
         var metadata = JsonSerializer.Deserialize<JsonColdStoreStoreMetadata>(
-            bytes,
+            json,
             StoreJsonOptions);
 
         if (metadata is null)
@@ -67,7 +68,8 @@ internal sealed class JsonColdStoreCatalog
         JsonColdStoreStoreMetadata metadata,
         CancellationToken cancellationToken)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(metadata, StoreJsonOptions);
+        var json = JsonSerializer.SerializeToUtf8Bytes(metadata, StoreJsonOptions);
+        var bytes = EncodeMetadata(json);
         await JsonColdStoreAtomicFileWriter.WriteAsync(
             _options.DatabaseDirectory,
             [StoreFileName],
@@ -75,6 +77,24 @@ internal sealed class JsonColdStoreCatalog
             _options.FsyncOnWrite,
             cancellationToken);
     }
+
+    private byte[] EncodeMetadata(ReadOnlySpan<byte> json) =>
+        _options.Encryption is null
+            ? json.ToArray()
+            : JsonColdStorePayloadCodec.Encode(json, CreateMetadataCodecOptions());
+
+    private byte[] DecodeMetadata(ReadOnlySpan<byte> bytes) =>
+        JsonColdStorePayloadCodec.IsEnvelope(bytes)
+            ? JsonColdStorePayloadCodec.Decode(bytes, CreateMetadataCodecOptions())
+            : bytes.ToArray();
+
+    private JsonColdStoreOptions CreateMetadataCodecOptions() =>
+        _options.Encryption is null
+            ? _options
+            : _options with
+            {
+                Encryption = _options.Encryption with { KeyId = null },
+            };
 
     private void Validate(JsonColdStoreStoreMetadata metadata)
     {

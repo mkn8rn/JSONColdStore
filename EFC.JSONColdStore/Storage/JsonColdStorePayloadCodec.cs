@@ -25,6 +25,9 @@ internal static class JsonColdStorePayloadCodec
 
     private static ReadOnlySpan<byte> Magic => "JCS1"u8;
 
+    internal static bool IsEnvelope(ReadOnlySpan<byte> encoded) =>
+        encoded.Length >= 4 && encoded[..4].SequenceEqual(Magic);
+
     internal static byte[] Encode(ReadOnlySpan<byte> plaintext, JsonColdStoreOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -257,7 +260,7 @@ internal static class JsonColdStorePayloadCodec
 
     private static Envelope ReadEnvelope(ReadOnlySpan<byte> encoded)
     {
-        if (encoded.Length < HeaderLength || !encoded[..4].SequenceEqual(Magic))
+        if (encoded.Length < HeaderLength || !IsEnvelope(encoded))
             throw new InvalidDataException("The payload is not a JSONColdStore envelope.");
 
         if (encoded[4] != Version)

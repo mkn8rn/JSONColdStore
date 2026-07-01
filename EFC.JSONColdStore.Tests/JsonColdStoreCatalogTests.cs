@@ -74,6 +74,48 @@ public sealed class JsonColdStoreCatalogTests
     }
 
     [Fact]
+    public async Task LoadAndValidateAsyncReadsPlaintextEncryptedMetadataWithKey()
+    {
+        var root = NewTempDirectory();
+        using var key = JsonColdStoreEncryptionKey.FromBytes(new byte[32]);
+        var encryptedOptions = new JsonColdStoreOptionsBuilder(root)
+            .UseEncryptionKey(key)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var encryptedMetadata = JsonColdStoreStoreMetadata.CreateNew(
+            encryptedOptions,
+            providerVersion: "test");
+        await WriteMetadataAsync(root, encryptedMetadata);
+        var catalog = new JsonColdStoreCatalog(encryptedOptions);
+
+        var metadata = await catalog.LoadAndValidateAsync();
+
+        Assert.Equal(encryptedMetadata.StoreId, metadata.StoreId);
+        Assert.True(metadata.Policy.EncryptionEnabled);
+    }
+
+    [Fact]
+    public async Task LoadAndValidateAsyncRequiresKeyForProtectedMetadata()
+    {
+        var root = NewTempDirectory();
+        using var key = JsonColdStoreEncryptionKey.FromBytes(new byte[32]);
+        var encryptedOptions = new JsonColdStoreOptionsBuilder(root)
+            .UseEncryptionKey(key)
+            .UseFsyncOnWrite(false)
+            .Build();
+        await new JsonColdStoreCatalog(encryptedOptions).EnsureInitializedAsync();
+        var plaintextOptions = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var catalog = new JsonColdStoreCatalog(plaintextOptions);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => catalog.LoadAndValidateAsync());
+
+        Assert.Contains("encryption key", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task LoadAndValidateAsyncRejectsPlaintextStoreWhenEncryptionIsRequired()
     {
         var root = NewTempDirectory();
@@ -218,10 +260,33 @@ public sealed class JsonColdStoreCatalogTests
 
         await catalog.EnsureInitializedAsync();
 
-        var metadataText = await File.ReadAllTextAsync(Path.Combine(root, JsonColdStoreCatalog.StoreFileName));
+        var metadataBytes = await File.ReadAllBytesAsync(Path.Combine(root, JsonColdStoreCatalog.StoreFileName));
+        var metadataText = PrintableText(metadataBytes);
         Assert.DoesNotContain("do-not-persist", metadataText, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("key", metadataText, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("encryptionEnabled", metadataText, StringComparison.Ordinal);
+        Assert.DoesNotContain("encryptionEnabled", metadataText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task EnsureInitializedAsyncProtectsEncryptedRootMetadata()
+    {
+        var root = NewTempDirectory();
+        using var key = JsonColdStoreEncryptionKey.FromBytes(new byte[32]);
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseEncryptionKey(key)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var catalog = new JsonColdStoreCatalog(options);
+
+        var metadata = await catalog.EnsureInitializedAsync();
+
+        var metadataBytes = await File.ReadAllBytesAsync(Path.Combine(root, JsonColdStoreCatalog.StoreFileName));
+        var metadataText = PrintableText(metadataBytes);
+        var reopened = await new JsonColdStoreCatalog(options).LoadAndValidateAsync();
+        Assert.True(metadata.Policy.EncryptionEnabled);
+        Assert.True(JsonColdStorePayloadCodec.IsEnvelope(metadataBytes));
+        Assert.DoesNotContain("encryptionEnabled", metadataText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("formatVersion", metadataText, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(metadata.StoreId, reopened.StoreId);
     }
 
     private static async Task WriteMetadataAsync(string root, JsonColdStoreStoreMetadata metadata)
@@ -237,4 +302,7 @@ public sealed class JsonColdStoreCatalogTests
         Directory.CreateDirectory(root);
         return root;
     }
+
+    private static string PrintableText(byte[] bytes) =>
+        string.Concat(bytes.Select(value => value is >= 32 and <= 126 ? (char)value : '.'));
 }

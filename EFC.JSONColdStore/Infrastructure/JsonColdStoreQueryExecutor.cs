@@ -385,7 +385,7 @@ internal static class JsonColdStoreQueryExecutor
 
         if (seek is not null)
         {
-            if (string.Equals(seek.PropertyName, entityDescriptor.Key.PropertyName, StringComparison.Ordinal))
+            if (IsSinglePropertyKeySeek(entityDescriptor, seek))
             {
                 var entity = await entityStore.ReadEntityAsync<TEntity>(
                         seek.Value!,
@@ -574,7 +574,7 @@ internal static class JsonColdStoreQueryExecutor
         if (seek is null || seek.Value is null)
             return false;
 
-        if (string.Equals(seek.PropertyName, descriptor.Key.PropertyName, StringComparison.Ordinal))
+        if (IsSinglePropertyKeySeek(descriptor, seek))
             return true;
 
         return descriptor.Indexes.Any(index =>
@@ -593,6 +593,12 @@ internal static class JsonColdStoreQueryExecutor
             index.PropertyNames.Length == 1
             && string.Equals(index.PropertyNames[0], range.PropertyName, StringComparison.Ordinal));
     }
+
+    private static bool IsSinglePropertyKeySeek(
+        JsonColdStoreEntityDescriptor descriptor,
+        JsonColdStoreQuerySeek seek) =>
+        descriptor.Key.PropertyNames.Count == 1
+        && string.Equals(descriptor.Key.PropertyNames[0], seek.PropertyName, StringComparison.Ordinal);
 
     private static JsonColdStoreQuerySeek? TryCreateSeek(
         QueryContext queryContext,

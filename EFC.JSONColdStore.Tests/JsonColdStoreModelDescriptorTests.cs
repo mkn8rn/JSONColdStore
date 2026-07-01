@@ -25,8 +25,8 @@ public sealed class JsonColdStoreModelDescriptorTests
 
         Assert.Equal(typeof(ConsumerEvent).FullName, entity.EntityName);
         Assert.Equal(typeof(ConsumerEvent), entity.ClrType);
-        Assert.Equal("Id", entity.Key.PropertyName);
-        Assert.Equal(typeof(Guid), entity.Key.ClrType);
+        Assert.Equal(["Id"], entity.Key.PropertyNames);
+        Assert.Equal([typeof(Guid)], entity.Key.ClrTypes);
         Assert.Equal("a4b40f00-6a1b-48dd-b544-9b6924e0f4f2", entity.CreateRecordId(
             Guid.Parse("a4b40f00-6a1b-48dd-b544-9b6924e0f4f2")));
         Assert.Contains(entity.Indexes, index => index.PropertyNames.SequenceEqual(["ConsumerId"]));
@@ -49,7 +49,7 @@ public sealed class JsonColdStoreModelDescriptorTests
     }
 
     [Fact]
-    public void CreateRejectsCompositePrimaryKeysForFirstProviderVersion()
+    public void CreateCapturesCompositePrimaryKeys()
     {
         var model = CreateModel(modelBuilder =>
         {
@@ -57,16 +57,52 @@ public sealed class JsonColdStoreModelDescriptorTests
                 .HasKey(value => new { value.PartitionId, value.Id });
         });
 
-        var exception = Assert.Throws<NotSupportedException>(
-            () => JsonColdStoreModelDescriptor.Create(model));
+        var descriptor = JsonColdStoreModelDescriptor.Create(model);
+        var entity = descriptor.FindEntity(typeof(CompositeKeyEvent));
 
-        Assert.Contains("must use one primary key property", exception.Message);
+        Assert.Equal(["PartitionId", "Id"], entity.Key.PropertyNames);
+        Assert.Equal([typeof(string), typeof(int)], entity.Key.ClrTypes);
+        Assert.Equal(
+            "partition-a\u001F7",
+            entity.CreateRecordIdFromEntity(new CompositeKeyEvent
+            {
+                PartitionId = "partition-a",
+                Id = 7,
+            }));
+    }
+
+    [Fact]
+    public void CreateCapturesSharedTypeJoinEntities()
+    {
+        var model = CreateModel(modelBuilder =>
+        {
+            modelBuilder.Entity<SharedPost>().HasKey(value => value.Id);
+            modelBuilder.Entity<SharedTag>().HasKey(value => value.Id);
+            modelBuilder.SharedTypeEntity<Dictionary<string, object>>(
+                "SharedPostSharedTag",
+                entity =>
+                {
+                    entity.IndexerProperty<Guid>("PostsId");
+                    entity.IndexerProperty<Guid>("TagsId");
+                    entity.HasKey("PostsId", "TagsId");
+                });
+        });
+
+        var descriptor = JsonColdStoreModelDescriptor.Create(model);
+
+        Assert.Contains(descriptor.Entities, entity => entity.ClrType == typeof(SharedPost));
+        Assert.Contains(descriptor.Entities, entity => entity.ClrType == typeof(SharedTag));
+        var sharedEntity = Assert.Single(descriptor.Entities, entity => entity.IsSharedType);
+        Assert.Equal(typeof(Dictionary<string, object>), sharedEntity.ClrType);
+        Assert.Equal(2, sharedEntity.Key.PropertyNames.Count);
+        Assert.All(sharedEntity.Key.PropertyNames, propertyName => Assert.False(string.IsNullOrWhiteSpace(propertyName)));
     }
 
     [Fact]
     public void CreateRecordIdRejectsNullOrEmptyKeys()
     {
-        var key = new JsonColdStoreKeyDescriptor("Id", typeof(string));
+        var key = new JsonColdStoreKeyDescriptor(
+            [new JsonColdStorePropertyDescriptor("Id", typeof(string), null)]);
 
         Assert.Throws<InvalidOperationException>(() => key.CreateRecordId(null));
         Assert.Throws<InvalidOperationException>(() => key.CreateRecordId(" "));
@@ -113,5 +149,19 @@ public sealed class JsonColdStoreModelDescriptorTests
         public string PartitionId { get; set; } = string.Empty;
 
         public int Id { get; set; }
+    }
+
+    private sealed class SharedPost
+    {
+        public Guid Id { get; set; }
+
+        public List<SharedTag> Tags { get; } = [];
+    }
+
+    private sealed class SharedTag
+    {
+        public Guid Id { get; set; }
+
+        public List<SharedPost> Posts { get; } = [];
     }
 }

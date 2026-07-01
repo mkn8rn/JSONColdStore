@@ -105,10 +105,13 @@ internal sealed class JsonColdStoreDatabaseCreator : IDatabaseCreator
         var modelCatalog = new JsonColdStoreModelCatalog(
             _options,
             session.Metadata.Policy.EncryptionEnabled);
+        var modelDescriptor = JsonColdStoreModelDescriptor.Create(_currentDbContext.Context.Model);
         await modelCatalog.EnsureCompatibleAsync(
-            JsonColdStoreModelDescriptor.Create(_currentDbContext.Context.Model),
+            modelDescriptor,
             createIfMissing: true,
             cancellationToken).ConfigureAwait(false);
+        var entityStore = new JsonColdStoreEntityRecordStore(session, modelDescriptor);
+        await entityStore.ImportLegacyRecordsAsync(cancellationToken).ConfigureAwait(false);
 
         return !existed;
     }

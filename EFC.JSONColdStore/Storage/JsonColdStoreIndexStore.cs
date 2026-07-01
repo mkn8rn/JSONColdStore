@@ -26,7 +26,7 @@ internal sealed class JsonColdStoreIndexStore
         string recordId,
         CancellationToken cancellationToken = default)
     {
-        ValidateIndexInput(indexName, indexKey, recordId);
+        ValidateIndexNameAndRecordId(indexName, recordId);
 
         var document = await ReadDocumentAsync(entityName, indexName, cancellationToken);
         RemoveRecordId(document, recordId);
@@ -84,7 +84,8 @@ internal sealed class JsonColdStoreIndexStore
         string indexKey,
         CancellationToken cancellationToken = default)
     {
-        ValidateIndexInput(indexName, indexKey, recordId: "probe");
+        if (string.IsNullOrWhiteSpace(indexName))
+            throw new ArgumentException("An index name is required.", nameof(indexName));
 
         var document = await ReadDocumentAsync(entityName, indexName, cancellationToken);
         return document.Buckets.TryGetValue(indexKey, out var bucket)
@@ -192,7 +193,7 @@ internal sealed class JsonColdStoreIndexStore
     private static JsonColdStoreIndexDocument Normalize(JsonColdStoreIndexDocument document)
     {
         var buckets = document.Buckets
-            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value.Count > 0)
+            .Where(pair => pair.Value.Count > 0)
             .OrderBy(pair => pair.Key, StringComparer.Ordinal)
             .ToDictionary(
                 pair => pair.Key,
@@ -215,12 +216,10 @@ internal sealed class JsonColdStoreIndexStore
         JsonColdStoreNameEncoder.EncodePathSegment(indexName) + ".json",
     ];
 
-    private static void ValidateIndexInput(string indexName, string indexKey, string recordId)
+    private static void ValidateIndexNameAndRecordId(string indexName, string recordId)
     {
         if (string.IsNullOrWhiteSpace(indexName))
             throw new ArgumentException("An index name is required.", nameof(indexName));
-        if (string.IsNullOrWhiteSpace(indexKey))
-            throw new ArgumentException("An index key is required.", nameof(indexKey));
         if (string.IsNullOrWhiteSpace(recordId))
             throw new ArgumentException("A record id is required.", nameof(recordId));
     }

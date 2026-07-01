@@ -115,6 +115,39 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public void EnsureCreatedAllowsModelWithSharedTypeJoinEntity()
+    {
+        var directory = TestDirectory("shared-join-model-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<ManyToManyDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new ManyToManyDbContext(builder.Options);
+
+        context.Database.EnsureCreated();
+
+        Assert.True(context.Database.CanConnect());
+    }
+
+    [Fact]
+    public async Task SaveChangesPersistsSharedTypeJoinEntityWrites()
+    {
+        var directory = TestDirectory("shared-join-write-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<ManyToManyDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new ManyToManyDbContext(builder.Options);
+        var post = new ManyToManyPost { Id = Guid.NewGuid() };
+        var tag = new ManyToManyTag { Id = Guid.NewGuid() };
+        post.Tags.Add(tag);
+        context.Posts.Add(post);
+
+        var saved = context.SaveChanges();
+        var verification = await context.Database.VerifyJsonColdStoreAsync();
+
+        Assert.Equal(3, saved);
+        Assert.Equal(3, verification.VerifiedRecords);
+        Assert.Equal(0, verification.VerifiedLegacyRecords);
+    }
+
+    [Fact]
     public void CanConnectReturnsFalseForInvalidModelCatalog()
     {
         var directory = TestDirectory("can-connect-invalid-model-" + Guid.NewGuid().ToString("N"));
@@ -262,6 +295,37 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         Assert.False(context.Database.EnsureCreated());
         Assert.True(File.Exists(Path.Combine(directory, "_store.json")));
         Assert.True(File.Exists(Path.Combine(directory, "_model.json")));
+    }
+
+    [Fact]
+    public async Task EnsureCreatedImportsLegacyRecordsIntoCurrentStore()
+    {
+        var directory = TestDirectory("ensure-created-imports-legacy-" + Guid.NewGuid().ToString("N"));
+        var id = Guid.Parse("62000000-0000-0000-0000-000000000004");
+        await WriteLegacyEntityAsync(
+            directory,
+            new WritableEntity
+            {
+                Id = id,
+                Value = "legacy-import",
+                Score = 42,
+            });
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        Assert.True(context.Database.EnsureCreated());
+
+        var read = await context.Database.ReadJsonColdStoreAsync<WritableEntity>(id);
+        var verification = await context.Database.VerifyJsonColdStoreAsync();
+
+        Assert.NotNull(read);
+        Assert.Equal("legacy-import", read.Value);
+        Assert.Equal(42, read.Score);
+        Assert.False(File.Exists(Path.Combine(directory, nameof(WritableEntity), $"{id}.json")));
+        Assert.True(File.Exists(CurrentRecordPath(directory, id)));
+        Assert.Equal(1, verification.VerifiedRecords);
+        Assert.Equal(0, verification.VerifiedLegacyRecords);
     }
 
     [Fact]
@@ -3030,6 +3094,36 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         {
             modelBuilder.Entity<WritableEntity>(entity => entity.HasKey(value => value.Id));
         }
+    }
+
+    private sealed class ManyToManyDbContext(DbContextOptions<ManyToManyDbContext> options) : DbContext(options)
+    {
+        public DbSet<ManyToManyPost> Posts => Set<ManyToManyPost>();
+
+        public DbSet<ManyToManyTag> Tags => Set<ManyToManyTag>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<ManyToManyPost>().HasKey(value => value.Id);
+            modelBuilder.Entity<ManyToManyTag>().HasKey(value => value.Id);
+            modelBuilder.Entity<ManyToManyPost>()
+                .HasMany(value => value.Tags)
+                .WithMany(value => value.Posts);
+        }
+    }
+
+    private sealed class ManyToManyPost
+    {
+        public Guid Id { get; set; }
+
+        public List<ManyToManyTag> Tags { get; } = [];
+    }
+
+    private sealed class ManyToManyTag
+    {
+        public Guid Id { get; set; }
+
+        public List<ManyToManyPost> Posts { get; } = [];
     }
 
     private sealed class WritableEntity

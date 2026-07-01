@@ -91,13 +91,13 @@ internal sealed class JsonColdStoreDatabase : IDatabase
                 case EntityState.Added:
                 case EntityState.Modified:
                     var entity = entry.ToEntityEntry().Entity;
-                    var descriptor = modelDescriptor.FindEntity(entry.EntityType.ClrType);
+                    var descriptor = modelDescriptor.FindEntity(entry.EntityType);
                     pendingChanges.DeletedRecordIdsByEntity.TryGetValue(
                         descriptor.EntityName,
                         out var ignoredRecordIds);
                     await entityStore.WriteEntityAsync(
                         entity,
-                        entry.EntityType.ClrType,
+                        descriptor,
                         ignoredRecordIds,
                         cancellationToken);
                     saved++;
@@ -105,9 +105,10 @@ internal sealed class JsonColdStoreDatabase : IDatabase
 
                 case EntityState.Deleted:
                     var deletedEntity = entry.ToEntityEntry().Entity;
+                    var deletedDescriptor = modelDescriptor.FindEntity(entry.EntityType);
                     await entityStore.DeleteEntityAsync(
                         deletedEntity,
-                        entry.EntityType.ClrType,
+                        deletedDescriptor,
                         cancellationToken);
                     saved++;
                     break;
@@ -133,7 +134,7 @@ internal sealed class JsonColdStoreDatabase : IDatabase
                 continue;
 
             var entity = entry.ToEntityEntry().Entity;
-            var descriptor = modelDescriptor.FindEntity(entry.EntityType.ClrType);
+            var descriptor = modelDescriptor.FindEntity(entry.EntityType);
             var recordId = descriptor.CreateRecordIdFromEntity(entity);
 
             if (entry.EntityState == EntityState.Deleted)
@@ -199,7 +200,7 @@ internal sealed class JsonColdStoreDatabase : IDatabase
                 out var ignoredRecordIds);
             await entityStore.ValidateUniqueIndexesAsync(
                 write.Entity,
-                write.EntityType,
+                write.Descriptor,
                 ignoredRecordIds,
                 cancellationToken);
         }

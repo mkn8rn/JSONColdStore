@@ -71,6 +71,22 @@ internal sealed class JsonColdStoreEntityRecordStore
         ArgumentNullException.ThrowIfNull(entityType);
 
         var descriptor = _modelDescriptor.FindEntity(entityType);
+        await WriteEntityAsync(
+            entity,
+            descriptor,
+            ignoredRecordIds,
+            cancellationToken);
+    }
+
+    internal async Task WriteEntityAsync(
+        object entity,
+        JsonColdStoreEntityDescriptor descriptor,
+        IReadOnlySet<string>? ignoredRecordIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        ArgumentNullException.ThrowIfNull(descriptor);
+
         await EnsureModelCatalogAsync(createIfMissing: true, cancellationToken);
         var recordId = descriptor.CreateRecordIdFromEntity(entity);
         await EnsureUniqueIndexesAsync(
@@ -79,7 +95,9 @@ internal sealed class JsonColdStoreEntityRecordStore
             recordId,
             ignoredRecordIds,
             cancellationToken);
-        var payload = JsonSerializer.SerializeToUtf8Bytes(entity, entityType, EntityWriteJsonOptions);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(
+            descriptor.CreateRecordPayload(entity),
+            EntityWriteJsonOptions);
 
         await _session.Records.WriteRecordAsync(
             descriptor.EntityName,
@@ -101,6 +119,22 @@ internal sealed class JsonColdStoreEntityRecordStore
         ArgumentNullException.ThrowIfNull(entityType);
 
         var descriptor = _modelDescriptor.FindEntity(entityType);
+        await ValidateUniqueIndexesAsync(
+            entity,
+            descriptor,
+            ignoredRecordIds,
+            cancellationToken);
+    }
+
+    internal async Task ValidateUniqueIndexesAsync(
+        object entity,
+        JsonColdStoreEntityDescriptor descriptor,
+        IReadOnlySet<string>? ignoredRecordIds = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        ArgumentNullException.ThrowIfNull(descriptor);
+
         await EnsureModelCatalogAsync(createIfMissing: true, cancellationToken);
         var recordId = descriptor.CreateRecordIdFromEntity(entity);
         await EnsureUniqueIndexesAsync(
@@ -360,6 +394,82 @@ internal sealed class JsonColdStoreEntityRecordStore
         return records;
     }
 
+    internal async Task<int> ImportLegacyRecordsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureModelCatalogAsync(createIfMissing: true, cancellationToken);
+        var imported = 0;
+
+        foreach (var descriptor in _modelDescriptor.Entities)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            imported += await ImportLegacyRecordsAsync(descriptor, cancellationToken);
+        }
+
+        return imported;
+    }
+
+    private async Task<int> ImportLegacyRecordsAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        CancellationToken cancellationToken)
+    {
+        if (descriptor.IsSharedType)
+            return 0;
+
+        var currentRecordIds = new HashSet<string>(StringComparer.Ordinal);
+        await foreach (var record in _session.Records.ReadAllNamedRecordsAsync(
+            descriptor.EntityName,
+            cancellationToken))
+        {
+            currentRecordIds.Add(record.RecordId);
+        }
+
+        var legacyRecords = new List<JsonColdStoreLegacyRecord>();
+        await foreach (var legacyRecord in _session.LegacyRecords.ReadAllRecordsAsync(
+            descriptor,
+            cancellationToken))
+        {
+            legacyRecords.Add(legacyRecord);
+        }
+
+        var imported = 0;
+        foreach (var legacyRecord in legacyRecords)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (currentRecordIds.Contains(legacyRecord.RecordId))
+            {
+                _session.LegacyRecords.DeleteRecordIfExists(descriptor, legacyRecord.RecordId);
+                continue;
+            }
+
+            var entity = JsonSerializer.Deserialize(
+                legacyRecord.Payload,
+                descriptor.ClrType,
+                EntityReadJsonOptions);
+            if (entity is null)
+                throw new InvalidDataException(
+                    $"The legacy JSONColdStore record for '{descriptor.EntityName}' deserialized to null.");
+
+            var currentRecordId = descriptor.CreateRecordIdFromEntity(entity);
+            if (currentRecordIds.Contains(currentRecordId))
+            {
+                _session.LegacyRecords.DeleteRecordIfExists(descriptor, legacyRecord.RecordId);
+                continue;
+            }
+
+            await WriteEntityAsync(
+                entity,
+                descriptor,
+                ignoredRecordIds: null,
+                cancellationToken);
+            currentRecordIds.Add(currentRecordId);
+            _session.LegacyRecords.DeleteRecordIfExists(descriptor, legacyRecord.RecordId);
+            imported++;
+        }
+
+        return imported;
+    }
+
     private static void AddEntityToIndexBuckets(
         JsonColdStoreEntityDescriptor descriptor,
         Dictionary<JsonColdStoreIndexDescriptor, Dictionary<string, List<string>>> bucketsByIndex,
@@ -508,7 +618,7 @@ internal sealed class JsonColdStoreEntityRecordStore
         }
 
         return buckets
-            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value.Count > 0)
+            .Where(pair => pair.Value.Count > 0)
             .OrderBy(pair => pair.Key, StringComparer.Ordinal)
             .ToDictionary(
                 pair => pair.Key,
@@ -606,7 +716,7 @@ internal sealed class JsonColdStoreEntityRecordStore
         if (string.Equals(bucketKey, "<null>", StringComparison.Ordinal))
             return false;
 
-        var propertyType = index.Properties[0].PropertyType;
+        var propertyType = index.Properties[0].ClrType;
         if (!TryConvertRangeOperand(bucketKey, propertyType, out var bucketValue))
             return true;
 
@@ -715,6 +825,17 @@ internal sealed class JsonColdStoreEntityRecordStore
         ArgumentNullException.ThrowIfNull(entityType);
 
         var descriptor = _modelDescriptor.FindEntity(entityType);
+        await DeleteEntityAsync(entity, descriptor, cancellationToken);
+    }
+
+    internal async Task DeleteEntityAsync(
+        object entity,
+        JsonColdStoreEntityDescriptor descriptor,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        ArgumentNullException.ThrowIfNull(descriptor);
+
         await EnsureModelCatalogAsync(createIfMissing: true, cancellationToken);
         var recordId = descriptor.CreateRecordIdFromEntity(entity);
 

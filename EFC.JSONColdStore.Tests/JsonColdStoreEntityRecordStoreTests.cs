@@ -194,6 +194,34 @@ public sealed class JsonColdStoreEntityRecordStoreTests
     }
 
     [Fact]
+    public async Task WriteEntityAsyncMaintainsBlankStringIndexValue()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(CreateModel()));
+        var entity = new ConsumerEvent
+        {
+            Id = Guid.Parse("10000000-0000-0000-0000-000000000003"),
+            ConsumerId = string.Empty,
+            Payload = "blank indexed value",
+        };
+
+        await entityStore.WriteEntityAsync(entity);
+
+        var indexed = await entityStore.ReadEntitiesByIndexAsync<ConsumerEvent>("ConsumerId", string.Empty);
+        var verification = await entityStore.VerifyEntitiesAsync();
+
+        Assert.Single(indexed);
+        Assert.Equal(entity.Id, indexed[0].Id);
+        Assert.Equal(1, verification.VerifiedIndexes);
+    }
+
+    [Fact]
     public async Task WriteEntityAsyncMovesUpdatedRecordBetweenIndexBuckets()
     {
         var root = NewTempDirectory();
@@ -335,6 +363,7 @@ public sealed class JsonColdStoreEntityRecordStoreTests
         {
             entity.HasKey(value => value.Id);
             entity.HasIndex(value => value.ConsumerId);
+            entity.Property(value => value.Payload);
         });
 
         return modelBuilder.FinalizeModel();
@@ -343,7 +372,11 @@ public sealed class JsonColdStoreEntityRecordStoreTests
     private static IModel CreateModelWithoutIndexes()
     {
         var modelBuilder = new ModelBuilder(new ConventionSet());
-        modelBuilder.Entity<ConsumerEvent>(entity => entity.HasKey(value => value.Id));
+        modelBuilder.Entity<ConsumerEvent>(entity =>
+        {
+            entity.HasKey(value => value.Id);
+            entity.Property(value => value.Payload);
+        });
 
         return modelBuilder.FinalizeModel();
     }

@@ -173,6 +173,11 @@ internal sealed class JsonColdStoreModelCatalog
 
             ValidateKey(entity.Key);
 
+            if (entity.Properties is null)
+                throw new InvalidDataException("The JSONColdStore model catalog entity property list is required.");
+
+            ValidateProperties(entity.Properties);
+
             if (entity.Indexes is null)
                 throw new InvalidDataException("The JSONColdStore model catalog entity index list is required.");
 
@@ -183,11 +188,56 @@ internal sealed class JsonColdStoreModelCatalog
 
     private static void ValidateKey(JsonColdStoreKeySnapshot key)
     {
-        if (string.IsNullOrWhiteSpace(key.PropertyName))
-            throw new InvalidDataException("The JSONColdStore model catalog key property name is required.");
+        if (key.PropertyNames is null || key.PropertyNames.Count == 0)
+            throw new InvalidDataException("The JSONColdStore model catalog key property list is required.");
 
-        if (string.IsNullOrWhiteSpace(key.ClrTypeName))
-            throw new InvalidDataException("The JSONColdStore model catalog key CLR type is required.");
+        if (key.PropertyTypeNames is null)
+            throw new InvalidDataException("The JSONColdStore model catalog key property type list is required.");
+
+        if (key.PropertyTypeNames.Count != key.PropertyNames.Count)
+        {
+            throw new InvalidDataException(
+                "The JSONColdStore model catalog key property type count must match the property count.");
+        }
+
+        var propertyNames = new HashSet<string>(StringComparer.Ordinal);
+        for (var propertyIndex = 0; propertyIndex < key.PropertyNames.Count; propertyIndex++)
+        {
+            var propertyName = key.PropertyNames[propertyIndex];
+            if (string.IsNullOrWhiteSpace(propertyName))
+                throw new InvalidDataException("The JSONColdStore model catalog key property name is required.");
+
+            if (!propertyNames.Add(propertyName))
+            {
+                throw new InvalidDataException(
+                    $"The JSONColdStore model catalog contains duplicate key property '{propertyName}'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(key.PropertyTypeNames[propertyIndex]))
+                throw new InvalidDataException("The JSONColdStore model catalog key property type name is required.");
+        }
+    }
+
+    private static void ValidateProperties(IReadOnlyList<JsonColdStorePropertySnapshot> properties)
+    {
+        var propertyNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var property in properties)
+        {
+            if (property is null)
+                throw new InvalidDataException("The JSONColdStore model catalog contains an empty property.");
+
+            if (string.IsNullOrWhiteSpace(property.Name))
+                throw new InvalidDataException("The JSONColdStore model catalog property name is required.");
+
+            if (!propertyNames.Add(property.Name))
+            {
+                throw new InvalidDataException(
+                    $"The JSONColdStore model catalog contains duplicate property '{property.Name}'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(property.ClrTypeName))
+                throw new InvalidDataException("The JSONColdStore model catalog property CLR type is required.");
+        }
     }
 
     private static void ValidateIndex(JsonColdStoreIndexSnapshot index)
@@ -262,15 +312,24 @@ internal sealed record JsonColdStoreModelSnapshot
                     ClrTypeName = entity.ClrType.FullName ?? entity.ClrType.Name,
                     Key = new JsonColdStoreKeySnapshot
                     {
-                        PropertyName = entity.Key.PropertyName,
-                        ClrTypeName = entity.Key.ClrType.FullName ?? entity.Key.ClrType.Name,
+                        PropertyNames = entity.Key.PropertyNames,
+                        PropertyTypeNames = entity.Key.ClrTypes
+                            .Select(type => type.FullName ?? type.Name)
+                            .ToArray(),
                     },
+                    Properties = entity.Properties
+                        .Select(property => new JsonColdStorePropertySnapshot
+                        {
+                            Name = property.Name,
+                            ClrTypeName = property.ClrType.FullName ?? property.ClrType.Name,
+                        })
+                        .ToArray(),
                     Indexes = entity.Indexes
                         .Select(index => new JsonColdStoreIndexSnapshot
                         {
                             PropertyNames = index.PropertyNames,
                             PropertyTypeNames = index.Properties
-                                .Select(property => property.PropertyType.FullName ?? property.PropertyType.Name)
+                                .Select(property => property.ClrType.FullName ?? property.ClrType.Name)
                                 .ToArray(),
                             IsUnique = index.IsUnique,
                         })
@@ -289,12 +348,21 @@ internal sealed record JsonColdStoreEntitySnapshot
 
     public required JsonColdStoreKeySnapshot Key { get; init; }
 
+    public required IReadOnlyList<JsonColdStorePropertySnapshot> Properties { get; init; }
+
     public required IReadOnlyList<JsonColdStoreIndexSnapshot> Indexes { get; init; }
 }
 
 internal sealed record JsonColdStoreKeySnapshot
 {
-    public required string PropertyName { get; init; }
+    public required IReadOnlyList<string> PropertyNames { get; init; }
+
+    public required IReadOnlyList<string> PropertyTypeNames { get; init; }
+}
+
+internal sealed record JsonColdStorePropertySnapshot
+{
+    public required string Name { get; init; }
 
     public required string ClrTypeName { get; init; }
 }

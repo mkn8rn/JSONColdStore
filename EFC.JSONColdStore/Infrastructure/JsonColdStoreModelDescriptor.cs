@@ -22,9 +22,19 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
     {
         ArgumentNullException.ThrowIfNull(clrType);
 
-        return Entities.FirstOrDefault(entity => entity.ClrType == clrType)
+        return Entities.FirstOrDefault(entity => !entity.IsSharedType && entity.ClrType == clrType)
             ?? throw new InvalidOperationException(
                 $"The entity type '{clrType.FullName ?? clrType.Name}' is not part of the JSONColdStore model.");
+    }
+
+    internal JsonColdStoreEntityDescriptor FindEntity(IEntityType entityType)
+    {
+        ArgumentNullException.ThrowIfNull(entityType);
+
+        var entityName = GetStorageEntityName(entityType);
+        return Entities.FirstOrDefault(entity => string.Equals(entity.EntityName, entityName, StringComparison.Ordinal))
+            ?? throw new InvalidOperationException(
+                $"The entity type '{entityType.Name}' is not part of the JSONColdStore model.");
     }
 
     private static JsonColdStoreEntityDescriptor CreateEntityDescriptor(IEntityType entityType)
@@ -33,23 +43,21 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
             ?? throw new NotSupportedException(
                 $"JSONColdStore entity '{entityType.Name}' must define a primary key.");
 
-        if (primaryKey.Properties.Count != 1)
-        {
-            throw new NotSupportedException(
-                $"JSONColdStore entity '{entityType.Name}' must use one primary key property.");
-        }
-
-        var keyProperty = primaryKey.Properties[0];
-        var keyPropertyInfo = keyProperty.PropertyInfo
-            ?? throw new NotSupportedException(
-                $"JSONColdStore entity '{entityType.Name}' must use a CLR property-backed primary key.");
+        var propertiesByName = entityType.GetProperties()
+            .OrderBy(property => property.Name, StringComparer.Ordinal)
+            .ToDictionary(
+                property => property.Name,
+                property => CreatePropertyDescriptor(entityType, property, "property"),
+                StringComparer.Ordinal);
+        var properties = propertiesByName.Values.ToArray();
+        var keyProperties = primaryKey.Properties
+            .Select(property => propertiesByName[property.Name])
+            .ToArray();
         var indexes = entityType.GetIndexes()
             .Select(index =>
             {
                 var properties = index.Properties
-                    .Select(property => property.PropertyInfo
-                        ?? throw new NotSupportedException(
-                            $"JSONColdStore index on entity '{entityType.Name}' must use CLR property-backed members."))
+                    .Select(property => propertiesByName[property.Name])
                     .ToArray();
 
                 return new JsonColdStoreIndexDescriptor(
@@ -63,13 +71,35 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
         return new JsonColdStoreEntityDescriptor(
             GetStorageEntityName(entityType),
             entityType.ClrType,
-            new JsonColdStoreKeyDescriptor(keyProperty.Name, keyProperty.ClrType),
-            keyPropertyInfo,
+            entityType.HasSharedClrType,
+            properties,
+            new JsonColdStoreKeyDescriptor(keyProperties),
             indexes);
     }
 
+    private static JsonColdStorePropertyDescriptor CreatePropertyDescriptor(
+        IEntityType entityType,
+        IProperty property,
+        string usage)
+    {
+        var propertyInfo = property.PropertyInfo;
+        if (propertyInfo?.GetIndexParameters().Length > 0)
+            propertyInfo = null;
+
+        if (propertyInfo is null && !entityType.HasSharedClrType)
+        {
+            throw new NotSupportedException(
+                $"JSONColdStore {usage} on entity '{entityType.Name}' must use CLR property-backed members.");
+        }
+
+        return new JsonColdStorePropertyDescriptor(
+            property.Name,
+            property.ClrType,
+            propertyInfo);
+    }
+
     private static string GetStorageEntityName(IEntityType entityType) =>
-        !string.IsNullOrWhiteSpace(entityType.ClrType.FullName)
+        !entityType.HasSharedClrType && !string.IsNullOrWhiteSpace(entityType.ClrType.FullName)
             ? entityType.ClrType.FullName
             : entityType.Name;
 }
@@ -77,8 +107,9 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
 internal sealed record JsonColdStoreEntityDescriptor(
     string EntityName,
     Type ClrType,
+    bool IsSharedType,
+    IReadOnlyList<JsonColdStorePropertyDescriptor> Properties,
     JsonColdStoreKeyDescriptor Key,
-    PropertyInfo KeyProperty,
     IReadOnlyList<JsonColdStoreIndexDescriptor> Indexes)
 {
     internal string CreateRecordId(object? keyValue) => Key.CreateRecordId(keyValue);
@@ -92,7 +123,22 @@ internal sealed record JsonColdStoreEntityDescriptor(
                 $"The entity instance is not assignable to '{ClrType.FullName ?? ClrType.Name}'.");
         }
 
-        return CreateRecordId(KeyProperty.GetValue(entity));
+        return Key.CreateRecordIdFromEntity(entity);
+    }
+
+    internal IReadOnlyDictionary<string, object?> CreateRecordPayload(object entity)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        if (!ClrType.IsInstanceOfType(entity))
+        {
+            throw new InvalidOperationException(
+                $"The entity instance is not assignable to '{ClrType.FullName ?? ClrType.Name}'.");
+        }
+
+        return Properties.ToDictionary(
+            property => property.Name,
+            property => property.GetValue(entity),
+            StringComparer.Ordinal);
     }
 
     internal JsonColdStoreIndexDescriptor FindSinglePropertyIndex(string propertyName)
@@ -108,18 +154,78 @@ internal sealed record JsonColdStoreEntityDescriptor(
     }
 }
 
-internal sealed record JsonColdStoreKeyDescriptor(string PropertyName, Type ClrType)
+internal sealed record JsonColdStorePropertyDescriptor(
+    string Name,
+    Type ClrType,
+    PropertyInfo? PropertyInfo)
 {
+    internal object? GetValue(object entity)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        if (PropertyInfo is not null)
+            return PropertyInfo.GetValue(entity);
+
+        if (entity is IReadOnlyDictionary<string, object?> readOnlyDictionary
+            && readOnlyDictionary.TryGetValue(Name, out var readOnlyValue))
+        {
+            return readOnlyValue;
+        }
+
+        if (entity is IDictionary<string, object?> dictionary
+            && dictionary.TryGetValue(Name, out var value))
+        {
+            return value;
+        }
+
+        throw new InvalidOperationException(
+            $"The JSONColdStore property '{Name}' is not available on the shared-type entity instance.");
+    }
+}
+
+internal sealed record JsonColdStoreKeyDescriptor(IReadOnlyList<JsonColdStorePropertyDescriptor> Properties)
+{
+    internal IReadOnlyList<string> PropertyNames { get; } = Properties.Select(property => property.Name).ToArray();
+
+    internal IReadOnlyList<Type> ClrTypes { get; } = Properties.Select(property => property.ClrType).ToArray();
+
     internal string CreateRecordId(object? keyValue)
+    {
+        if (Properties.Count == 1)
+            return CreateRecordIdPart(Properties[0].Name, keyValue);
+
+        if (keyValue is IEnumerable<object?> keyValues)
+            return CreateRecordId(keyValues.ToArray());
+
+        throw new InvalidOperationException(
+            "Composite JSONColdStore primary keys require one key value per key property.");
+    }
+
+    internal string CreateRecordIdFromEntity(object entity) =>
+        CreateRecordId(Properties.Select(property => property.GetValue(entity)).ToArray());
+
+    private string CreateRecordId(IReadOnlyList<object?> keyValues)
+    {
+        if (keyValues.Count != Properties.Count)
+        {
+            throw new InvalidOperationException(
+                "Composite JSONColdStore primary key value count must match the key property count.");
+        }
+
+        return string.Join(
+            "\u001F",
+            keyValues.Select((value, index) => CreateRecordIdPart(Properties[index].Name, value)));
+    }
+
+    private static string CreateRecordIdPart(string propertyName, object? keyValue)
     {
         if (keyValue is null)
             throw new InvalidOperationException(
-                $"The JSONColdStore primary key '{PropertyName}' cannot be null.");
+                $"The JSONColdStore primary key '{propertyName}' cannot be null.");
 
         var value = Convert.ToString(keyValue, CultureInfo.InvariantCulture);
         if (string.IsNullOrWhiteSpace(value))
             throw new InvalidOperationException(
-                $"The JSONColdStore primary key '{PropertyName}' cannot be empty.");
+                $"The JSONColdStore primary key '{propertyName}' cannot be empty.");
 
         return value;
     }
@@ -127,7 +233,7 @@ internal sealed record JsonColdStoreKeyDescriptor(string PropertyName, Type ClrT
 
 internal sealed record JsonColdStoreIndexDescriptor(
     string[] PropertyNames,
-    PropertyInfo[] Properties,
+    JsonColdStorePropertyDescriptor[] Properties,
     bool IsUnique)
 {
     internal string StorageName => string.Join("__", PropertyNames);

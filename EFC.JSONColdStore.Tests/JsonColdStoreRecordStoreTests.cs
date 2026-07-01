@@ -302,6 +302,74 @@ public sealed class JsonColdStoreRecordStoreTests
     }
 
     [Fact]
+    public async Task VerifyAllRecordsAsyncQuarantinesMalformedCurrentRecordName()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+        var malformedPath = await WriteMalformedCurrentRecordAsync(
+            root,
+            options,
+            "Entity",
+            "plain-record-id.jcs");
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.VerifyAllRecordsAsync());
+
+        Assert.False(File.Exists(malformedPath));
+        Assert.Single(Directory.GetFiles(Path.Combine(root, "_quarantine", "records"), "*.jcs"));
+    }
+
+    [Fact]
+    public async Task RepairAllRecordsAsyncQuarantinesMalformedCurrentRecordName()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+        var malformedPath = await WriteMalformedCurrentRecordAsync(
+            root,
+            options,
+            "Entity",
+            "plain-record-id.jcs");
+
+        var result = await store.RepairAllRecordsAsync();
+
+        Assert.Equal(0, result.VerifiedRecords);
+        Assert.Equal(1, result.QuarantinedRecords);
+        Assert.False(File.Exists(malformedPath));
+        Assert.Single(Directory.GetFiles(Path.Combine(root, "_quarantine", "records"), "*.jcs"));
+    }
+
+    [Fact]
+    public async Task RepairAllRecordsAsyncQuarantinesMalformedCurrentEntityDirectory()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+        var malformedPath = await WriteMalformedCurrentRecordAsync(
+            root,
+            options,
+            "plain-entity",
+            JsonColdStoreNameEncoder.EncodePathSegment("1") + ".jcs",
+            encodeEntityName: false);
+
+        var result = await store.RepairAllRecordsAsync();
+
+        Assert.Equal(0, result.VerifiedRecords);
+        Assert.Equal(1, result.QuarantinedRecords);
+        Assert.False(File.Exists(malformedPath));
+        Assert.Single(Directory.GetFiles(Path.Combine(root, "_quarantine", "records"), "*.jcs"));
+    }
+
+    [Fact]
     public async Task RecoverPendingManifestsDeletesManifestWhenTargetExists()
     {
         var root = NewTempDirectory();
@@ -539,6 +607,26 @@ public sealed class JsonColdStoreRecordStoreTests
             JsonColdStoreRecordStore.GetPendingManifestPathSegments(manifest.ManifestId),
             bytes,
             fsync: false);
+    }
+
+    private static async Task<string> WriteMalformedCurrentRecordAsync(
+        string root,
+        JsonColdStoreOptions options,
+        string entityName,
+        string fileName,
+        bool encodeEntityName = true)
+    {
+        var recordsDirectory = Path.Combine(
+            root,
+            "entities",
+            encodeEntityName ? JsonColdStoreNameEncoder.EncodePathSegment(entityName) : entityName,
+            "records");
+        Directory.CreateDirectory(recordsDirectory);
+
+        var path = Path.Combine(recordsDirectory, fileName);
+        var payload = JsonColdStorePayloadCodec.Encode("payload"u8, options);
+        await File.WriteAllBytesAsync(path, payload);
+        return path;
     }
 
     private static string ManifestPath(string root, Guid manifestId) =>

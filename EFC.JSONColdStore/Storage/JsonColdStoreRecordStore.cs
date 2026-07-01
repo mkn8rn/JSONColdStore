@@ -179,8 +179,7 @@ internal sealed class JsonColdStoreRecordStore
         foreach (var recordPath in Directory.EnumerateFiles(recordsDirectory, "*.jcs").Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var recordId = JsonColdStoreNameEncoder.DecodePathSegment(
-                Path.GetFileNameWithoutExtension(recordPath));
+            var recordId = DecodeCurrentRecordId(recordPath);
             var payload = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, recordPath, cancellationToken);
             byte[] decoded;
             try
@@ -224,6 +223,7 @@ internal sealed class JsonColdStoreRecordStore
                      SearchOption.AllDirectories).Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            _ = DecodeCurrentRecordId(recordPath);
             var payload = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, recordPath, cancellationToken);
             try
             {
@@ -275,6 +275,12 @@ internal sealed class JsonColdStoreRecordStore
             if (!File.Exists(recordPath))
                 continue;
 
+            if (!TryDecodeCurrentRecordIdForRepair(recordPath))
+            {
+                quarantinedRecords++;
+                continue;
+            }
+
             var payload = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, recordPath, cancellationToken);
             try
             {
@@ -289,6 +295,55 @@ internal sealed class JsonColdStoreRecordStore
         }
 
         return new JsonColdStoreRecordRepairResult(verifiedRecords, quarantinedRecords);
+    }
+
+    private string DecodeCurrentRecordId(string recordPath)
+    {
+        try
+        {
+            ValidateCurrentRecordPathShape(recordPath);
+            return JsonColdStoreNameEncoder.DecodePathSegment(
+                Path.GetFileNameWithoutExtension(recordPath));
+        }
+        catch (InvalidDataException)
+        {
+            QuarantineRecordPath(recordPath);
+            throw;
+        }
+    }
+
+    private bool TryDecodeCurrentRecordIdForRepair(string recordPath)
+    {
+        try
+        {
+            ValidateCurrentRecordPathShape(recordPath);
+            _ = JsonColdStoreNameEncoder.DecodePathSegment(
+                Path.GetFileNameWithoutExtension(recordPath));
+            return true;
+        }
+        catch (InvalidDataException)
+        {
+            QuarantineRecordPath(recordPath);
+            return false;
+        }
+    }
+
+    private static void ValidateCurrentRecordPathShape(string recordPath)
+    {
+        var recordsDirectory = Path.GetDirectoryName(recordPath);
+        if (!string.Equals(
+                Path.GetFileName(recordsDirectory),
+                "records",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("The current record path is not under a records directory.");
+        }
+
+        var entityDirectory = Path.GetDirectoryName(recordsDirectory);
+        if (string.IsNullOrWhiteSpace(entityDirectory))
+            throw new InvalidDataException("The current record path does not include an entity directory.");
+
+        _ = JsonColdStoreNameEncoder.DecodePathSegment(Path.GetFileName(entityDirectory));
     }
 
     internal async Task<JsonColdStoreRecoveryResult> RecoverPendingManifestsAsync(

@@ -180,6 +180,9 @@ internal sealed class JsonColdStoreEntityRecordStore
             if (entity is not null)
             {
                 seenRecordIds.Add(recordId);
+                if (!EntityMatchesIndexKey(index, entity, indexKey))
+                    continue;
+
                 results.Add(entity);
                 if (HasReachedLimit(results, maxResults))
                     return results;
@@ -934,7 +937,7 @@ internal sealed class JsonColdStoreEntityRecordStore
                     recordId,
                     cancellationToken);
                 var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityReadJsonOptions);
-                if (entity is not null)
+                if (entity is not null && EntityMatchesIndexKey(index, entity, indexKey))
                 {
                     results.Add(entity);
                     if (HasReachedLimit(results, maxResults))
@@ -969,6 +972,15 @@ internal sealed class JsonColdStoreEntityRecordStore
 
     private static bool HasReachedLimit<TEntity>(List<TEntity> results, int? maxResults) =>
         maxResults is not null && results.Count >= maxResults.Value;
+
+    private static bool EntityMatchesIndexKey(
+        JsonColdStoreIndexDescriptor index,
+        object entity,
+        string indexKey) =>
+        string.Equals(
+            index.CreateIndexKeyFromEntity(entity),
+            indexKey,
+            StringComparison.Ordinal);
 
     private sealed class NullableGuidConverter : JsonConverter<Guid>
     {

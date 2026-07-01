@@ -906,6 +906,32 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncFiltersCurrentRecordInWrongBucket()
+    {
+        var directory = TestDirectory("facade-index-wrong-bucket-" + Guid.NewGuid().ToString("N"));
+        var id = Guid.Parse("40000000-0000-0000-0000-000000000003");
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.Add(new WritableEntity
+        {
+            Id = id,
+            Value = "actual-value",
+        });
+        context.SaveChanges();
+        await MoveRecordIdToIndexBucketAsync(
+            IndexPath(directory, "Value"),
+            id.ToString(),
+            "wrong-value");
+
+        var matches = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            "Value",
+            "wrong-value");
+
+        Assert.Empty(matches);
+    }
+
+    [Fact]
     public async Task ReadJsonColdStoreIndexAsyncRejectsUndeclaredIndex()
     {
         var directory = TestDirectory("facade-index-missing-" + Guid.NewGuid().ToString("N"));
@@ -1672,6 +1698,28 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
 
         Assert.Single(matches);
         Assert.Equal(matchId, matches[0].Id);
+    }
+
+    [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncFiltersLegacyRecordInWrongBucket()
+    {
+        var directory = TestDirectory("legacy-index-wrong-bucket-" + Guid.NewGuid().ToString("N"));
+        var id = Guid.Parse("70000000-0000-0000-0000-000000000012");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = id,
+            Value = "legacy-actual-value",
+        });
+        await WriteLegacyIndexAsync(directory, "Value", "legacy-wrong-value", [id.ToString()]);
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var matches = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            "Value",
+            "legacy-wrong-value");
+
+        Assert.Empty(matches);
     }
 
     [Fact]

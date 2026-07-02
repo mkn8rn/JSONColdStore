@@ -573,6 +573,66 @@ public sealed class JsonColdStoreRecordStoreTests
     }
 
     [Fact]
+    public async Task VerifyAllRecordsAsyncRejectsReparsePointCurrentRecordFile()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var recordPath = JsonColdStorePathValidator.GetSafeChildPath(
+            root,
+            [.. JsonColdStoreRecordStore.GetRecordPathSegments("Entity", "linked-maintenance-file")]);
+        Directory.CreateDirectory(Path.GetDirectoryName(recordPath)!);
+        var outsideFile = Path.Combine(outside, "outside.jcs");
+        await File.WriteAllTextAsync(outsideFile, "outside maintenance file");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredFileLink(
+            recordPath,
+            outsideFile,
+            nameof(VerifyAllRecordsAsyncRejectsReparsePointCurrentRecordFile));
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => store.VerifyAllRecordsAsync());
+
+        Assert.Contains("current record file", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(recordPath, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside maintenance file", await File.ReadAllTextAsync(outsideFile));
+        Assert.False(Directory.Exists(Path.Combine(root, "_quarantine")));
+    }
+
+    [Fact]
+    public async Task VerifyAllRecordsAsyncRejectsReparsePointCurrentRecordsDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var recordsDirectory = CurrentRecordsDirectory(root, "Entity");
+        Directory.CreateDirectory(Path.GetDirectoryName(recordsDirectory)!);
+        var outsideFile = Path.Combine(outside, "outside.jcs");
+        await File.WriteAllTextAsync(outsideFile, "outside maintenance directory");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            recordsDirectory,
+            outside,
+            nameof(VerifyAllRecordsAsyncRejectsReparsePointCurrentRecordsDirectory));
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => store.VerifyAllRecordsAsync());
+
+        Assert.Contains("current record directory", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(recordsDirectory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside maintenance directory", await File.ReadAllTextAsync(outsideFile));
+        Assert.False(Directory.Exists(Path.Combine(root, "_quarantine")));
+    }
+
+    [Fact]
     public async Task RepairAllRecordsAsyncQuarantinesMalformedCurrentRecordName()
     {
         var root = NewTempDirectory();
@@ -593,6 +653,35 @@ public sealed class JsonColdStoreRecordStoreTests
         Assert.Equal(1, result.QuarantinedRecords);
         Assert.False(File.Exists(malformedPath));
         Assert.Single(Directory.GetFiles(Path.Combine(root, "_quarantine", "records"), "*.jcs"));
+    }
+
+    [Fact]
+    public async Task RepairAllRecordsAsyncRejectsReparsePointCurrentRecordsDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var recordsDirectory = CurrentRecordsDirectory(root, "Entity");
+        Directory.CreateDirectory(Path.GetDirectoryName(recordsDirectory)!);
+        var outsideFile = Path.Combine(outside, "outside.jcs");
+        await File.WriteAllTextAsync(outsideFile, "outside repair directory");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            recordsDirectory,
+            outside,
+            nameof(RepairAllRecordsAsyncRejectsReparsePointCurrentRecordsDirectory));
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => store.RepairAllRecordsAsync());
+
+        Assert.Contains("current record directory", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(recordsDirectory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside repair directory", await File.ReadAllTextAsync(outsideFile));
+        Assert.False(Directory.Exists(Path.Combine(root, "_quarantine")));
     }
 
     [Fact]

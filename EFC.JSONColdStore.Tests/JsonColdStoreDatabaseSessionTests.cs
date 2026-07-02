@@ -212,6 +212,35 @@ public sealed class JsonColdStoreDatabaseSessionTests
     }
 
     [Fact]
+    public async Task OpenAsyncFullHydrationRejectsReparsePointCurrentRecordsDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var recordsDirectory = CurrentRecordsDirectory(root, "Entity");
+        Directory.CreateDirectory(Path.GetDirectoryName(recordsDirectory)!);
+        var outsideFile = Path.Combine(outside, "outside.jcs");
+        await File.WriteAllTextAsync(outsideFile, "outside full hydration");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            recordsDirectory,
+            outside,
+            nameof(OpenAsyncFullHydrationRejectsReparsePointCurrentRecordsDirectory));
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseStartupMode(JsonColdStoreStartupMode.FullHydration)
+            .UseFsyncOnWrite(false)
+            .Build();
+
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => JsonColdStoreDatabaseSession.OpenAsync(options));
+
+        Assert.Contains("current record directory", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(recordsDirectory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside full hydration", await File.ReadAllTextAsync(outsideFile));
+        Assert.False(Directory.Exists(Path.Combine(outside, "_quarantine")));
+    }
+
+    [Fact]
     public async Task OpenAsyncFullHydrationQuarantinesChecksumCorruptRecord()
     {
         var root = NewTempDirectory();
@@ -374,6 +403,13 @@ public sealed class JsonColdStoreDatabaseSessionTests
         bytes[^1] ^= 0x7F;
         await File.WriteAllBytesAsync(recordPath, bytes);
     }
+
+    private static string CurrentRecordsDirectory(string root, string entityName) =>
+        JsonColdStorePathValidator.GetSafeChildPath(
+            root,
+            "entities",
+            JsonColdStoreNameEncoder.EncodePathSegment(entityName),
+            "records");
 
     private static string NewTempDirectory()
     {

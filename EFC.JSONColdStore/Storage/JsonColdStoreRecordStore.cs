@@ -236,7 +236,7 @@ internal sealed class JsonColdStoreRecordStore
             : _options;
         var verifiedRecords = 0;
 
-        foreach (var recordPath in JsonColdStoreDirectoryWalker.EnumerateFiles(entitiesDirectory, "*.jcs"))
+        foreach (var recordPath in EnumerateCurrentRecordPathsForMaintenance(entitiesDirectory))
         {
             cancellationToken.ThrowIfCancellationRequested();
             _ = DecodeCurrentRecordId(recordPath);
@@ -278,7 +278,7 @@ internal sealed class JsonColdStoreRecordStore
         };
         var verifiedRecords = 0;
         var quarantinedRecords = 0;
-        var recordPaths = JsonColdStoreDirectoryWalker.EnumerateFiles(entitiesDirectory, "*.jcs")
+        var recordPaths = EnumerateCurrentRecordPathsForMaintenance(entitiesDirectory)
             .ToArray();
 
         foreach (var recordPath in recordPaths)
@@ -307,6 +307,41 @@ internal sealed class JsonColdStoreRecordStore
         }
 
         return new JsonColdStoreRecordRepairResult(verifiedRecords, quarantinedRecords);
+    }
+
+    private static IEnumerable<string> EnumerateCurrentRecordPathsForMaintenance(string entitiesDirectory)
+    {
+        if (!Directory.Exists(entitiesDirectory))
+            yield break;
+
+        foreach (var recordPath in EnumerateCurrentRecordPathsForMaintenanceDirectory(entitiesDirectory))
+            yield return recordPath;
+    }
+
+    private static IEnumerable<string> EnumerateCurrentRecordPathsForMaintenanceDirectory(string directory)
+    {
+        if (JsonColdStoreDirectoryWalker.IsReparsePoint(directory))
+        {
+            throw new JsonColdStoreUnsafePathException(
+                "The JSONColdStore current record directory cannot be a reparse point.");
+        }
+
+        foreach (var file in Directory.EnumerateFiles(directory, "*.jcs").Order(StringComparer.Ordinal))
+        {
+            if (JsonColdStoreDirectoryWalker.IsReparsePoint(file))
+            {
+                throw new JsonColdStoreUnsafePathException(
+                    "The JSONColdStore current record file cannot be a reparse point.");
+            }
+
+            yield return file;
+        }
+
+        foreach (var childDirectory in Directory.EnumerateDirectories(directory).Order(StringComparer.Ordinal))
+        {
+            foreach (var recordPath in EnumerateCurrentRecordPathsForMaintenanceDirectory(childDirectory))
+                yield return recordPath;
+        }
     }
 
     private string DecodeCurrentRecordId(string recordPath)

@@ -1582,6 +1582,38 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task RepairJsonColdStoreAsyncRejectsReparsePointCurrentRecordsDirectory()
+    {
+        var directory = TestDirectory("repair-reparse-current-records-" + Guid.NewGuid().ToString("N"));
+        var outside = TestDirectory("repair-reparse-current-records-target-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using (var setupContext = new WritableDbContext(builder.Options))
+        {
+            setupContext.Database.EnsureCreated();
+        }
+
+        var recordsDirectory = CurrentRecordsDirectory(directory, typeof(WritableEntity).FullName!);
+        Directory.CreateDirectory(Path.GetDirectoryName(recordsDirectory)!);
+        var outsideFile = Path.Combine(outside, "outside.jcs");
+        await WriteTextFileAsync(outsideFile, "outside repair current record");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            recordsDirectory,
+            outside,
+            nameof(RepairJsonColdStoreAsyncRejectsReparsePointCurrentRecordsDirectory));
+
+        using var context = new WritableDbContext(builder.Options);
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => context.Database.RepairJsonColdStoreAsync());
+
+        Assert.Contains("current record directory", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(recordsDirectory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside repair current record", await File.ReadAllTextAsync(outsideFile));
+        Assert.False(Directory.Exists(Path.Combine(outside, "_quarantine")));
+    }
+
+    [Fact]
     public async Task CreateJsonColdStoreSnapshotAsyncCopiesStoreWithoutLocksOrNestedSnapshots()
     {
         var directory = TestDirectory("snapshot-copy-" + Guid.NewGuid().ToString("N"));

@@ -43,7 +43,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
         if (!LegacyDirectoryExistsAndIsSafe(GetEntityDirectory(descriptor)))
             return false;
 
-        return File.Exists(GetRecordPath(descriptor, recordId));
+        return LegacyRecordFileExists(descriptor, recordId);
     }
 
     internal async Task<byte[]> ReadRecordAsync(
@@ -109,7 +109,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
         ArgumentNullException.ThrowIfNull(descriptor);
         return descriptor.IsSharedType
             && LegacyDirectoryExistsAndIsSafe(GetSharedRowsDirectory(descriptor))
-            && File.Exists(GetSharedRowsPath(descriptor));
+            && SharedRowsFileExists(descriptor);
     }
 
     internal async IAsyncEnumerable<JsonColdStoreLegacySharedRow> ReadAllSharedRowsAsync(
@@ -124,7 +124,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
         if (!LegacyDirectoryExistsAndIsSafe(GetSharedRowsDirectory(descriptor)))
             yield break;
 
-        if (!File.Exists(rowsPath))
+        if (!SharedRowsFileExists(descriptor))
             yield break;
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -469,6 +469,24 @@ internal sealed class JsonColdStoreLegacyRecordStore
             _options.DatabaseDirectory,
             GetLegacyEntityDirectoryName(descriptor),
             recordId + ".json");
+    }
+
+    private bool LegacyRecordFileExists(JsonColdStoreEntityDescriptor descriptor, string recordId)
+    {
+        var recordPath = GetRecordPath(descriptor, recordId);
+        JsonColdStoreFileGuard.ThrowIfReparsePoint(
+            recordPath,
+            "The legacy record existence target cannot be a reparse point.");
+        return File.Exists(recordPath);
+    }
+
+    private bool SharedRowsFileExists(JsonColdStoreEntityDescriptor descriptor)
+    {
+        var rowsPath = GetSharedRowsPath(descriptor);
+        JsonColdStoreFileGuard.ThrowIfReparsePoint(
+            rowsPath,
+            "The legacy shared rows existence target cannot be a reparse point.");
+        return File.Exists(rowsPath);
     }
 
     private string GetEntityDirectory(JsonColdStoreEntityDescriptor descriptor) =>

@@ -98,7 +98,11 @@ internal sealed class JsonColdStoreIndexStore
         if (string.IsNullOrWhiteSpace(indexName))
             throw new ArgumentException("An index name is required.", nameof(indexName));
 
-        return File.Exists(GetIndexPath(entityName, indexName));
+        var path = GetIndexPath(entityName, indexName);
+        JsonColdStoreFileGuard.ThrowIfReparsePoint(
+            path,
+            "The JSONColdStore index document cannot be a reparse point.");
+        return File.Exists(path);
     }
 
     internal async Task<IReadOnlyList<string>> ReadAllRecordIdsAsync(

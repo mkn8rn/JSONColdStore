@@ -1288,6 +1288,42 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncRejectsReparsePointIndexDocument()
+    {
+        var directory = TestDirectory("facade-index-linked-document-" + Guid.NewGuid().ToString("N"));
+        var outside = TestDirectory("facade-index-linked-document-target-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outside);
+        var outsideFile = Path.Combine(outside, "outside-index.json");
+        await File.WriteAllTextAsync(outsideFile, "outside index");
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.Add(new WritableEntity
+        {
+            Id = Guid.Parse("50000000-0000-0000-0000-000000000010"),
+            Value = "linked-index",
+        });
+        context.SaveChanges();
+        var indexPath = IndexPath(directory, "Value");
+        File.Delete(indexPath);
+        JsonColdStoreReparsePointTestHelper.CreateRequiredFileLink(
+            indexPath,
+            outsideFile,
+            nameof(ReadJsonColdStoreIndexAsyncRejectsReparsePointIndexDocument));
+
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>("Value", "linked-index"));
+
+        Assert.Contains("index document", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(directory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(indexPath, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outsideFile, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("outside index", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(indexPath));
+        Assert.Equal("outside index", await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
     public async Task RebuildJsonColdStoreIndexesAsyncRepairsDeletedIndexFile()
     {
         var directory = TestDirectory("facade-index-rebuild-" + Guid.NewGuid().ToString("N"));
@@ -1532,6 +1568,42 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
 
         Assert.Contains("index", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Value", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VerifyJsonColdStoreAsyncRejectsReparsePointIndexDocument()
+    {
+        var directory = TestDirectory("verify-linked-index-document-" + Guid.NewGuid().ToString("N"));
+        var outside = TestDirectory("verify-linked-index-document-target-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outside);
+        var outsideFile = Path.Combine(outside, "outside-index.json");
+        await File.WriteAllTextAsync(outsideFile, "outside verify index");
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.Add(new WritableEntity
+        {
+            Id = Guid.Parse("51000000-0000-0000-0000-000000000020"),
+            Value = "verify-linked-index",
+        });
+        context.SaveChanges();
+        var indexPath = IndexPath(directory, "Value");
+        File.Delete(indexPath);
+        JsonColdStoreReparsePointTestHelper.CreateRequiredFileLink(
+            indexPath,
+            outsideFile,
+            nameof(VerifyJsonColdStoreAsyncRejectsReparsePointIndexDocument));
+
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => context.Database.VerifyJsonColdStoreAsync());
+
+        Assert.Contains("index document", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(directory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(indexPath, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outsideFile, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("outside verify index", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(indexPath));
+        Assert.Equal("outside verify index", await File.ReadAllTextAsync(outsideFile));
     }
 
     [Fact]

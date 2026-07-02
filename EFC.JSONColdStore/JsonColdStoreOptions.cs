@@ -26,7 +26,7 @@ public sealed record JsonColdStoreOptions
     /// <summary>Reserved background flush and queue back-pressure settings.</summary>
     public JsonColdStoreAsyncFlushOptions AsyncFlush { get; init; } = new();
 
-    /// <summary>Reserved retry behavior for background flush attempts.</summary>
+    /// <summary>Retry behavior for transient atomic write failures.</summary>
     public JsonColdStoreRetryOptions FlushRetry { get; init; } = JsonColdStoreRetryOptions.DefaultFlushRetry;
 
     /// <summary>Retry behavior for replaying pending transaction manifests.</summary>

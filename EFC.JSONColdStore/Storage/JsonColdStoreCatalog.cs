@@ -71,10 +71,9 @@ internal sealed class JsonColdStoreCatalog
         var json = JsonSerializer.SerializeToUtf8Bytes(metadata, StoreJsonOptions);
         var bytes = EncodeMetadata(json);
         await JsonColdStoreAtomicFileWriter.WriteAsync(
-            _options.DatabaseDirectory,
+            _options,
             [StoreFileName],
             bytes,
-            _options.FsyncOnWrite,
             cancellationToken);
     }
 

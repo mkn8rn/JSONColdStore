@@ -90,11 +90,11 @@ public sealed class JsonColdStoreOptionsBuilder
         return this;
     }
 
-    /// <summary>Rejects background flush retry because background flush is not available in this provider version.</summary>
+    /// <summary>Sets retry behavior for transient atomic write failures.</summary>
     public JsonColdStoreOptionsBuilder UseFlushRetry(int maxRetries, TimeSpan baseDelay)
     {
-        throw new NotSupportedException(
-            "Background async flush retry is not implemented in this JSONColdStore provider version.");
+        _flushRetry = CreateRetryOptions(maxRetries, baseDelay, nameof(maxRetries));
+        return this;
     }
 
     /// <summary>Sets the maximum retry count for transaction replay.</summary>

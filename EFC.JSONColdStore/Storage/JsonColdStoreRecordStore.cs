@@ -49,17 +49,15 @@ internal sealed class JsonColdStoreRecordStore
         var manifestBytes = EncodeManifest(manifest);
 
         await JsonColdStoreAtomicFileWriter.WriteAsync(
-            _options.DatabaseDirectory,
+            _options,
             manifest.StagedPathSegments!,
             payload,
-            _options.FsyncOnWrite,
             cancellationToken);
 
         await JsonColdStoreAtomicFileWriter.WriteAsync(
-            _options.DatabaseDirectory,
+            _options,
             manifestPath,
             manifestBytes,
-            _options.FsyncOnWrite,
             cancellationToken);
 
         try
@@ -92,10 +90,9 @@ internal sealed class JsonColdStoreRecordStore
         var manifestBytes = EncodeManifest(manifest);
 
         await JsonColdStoreAtomicFileWriter.WriteAsync(
-            _options.DatabaseDirectory,
+            _options,
             manifestPath,
             manifestBytes,
-            _options.FsyncOnWrite,
             cancellationToken);
 
         var targetPath = JsonColdStorePathValidator.GetSafeChildPath(

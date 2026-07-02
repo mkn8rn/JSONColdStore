@@ -160,10 +160,9 @@ internal sealed class JsonColdStoreIndexStore
         var json = JsonSerializer.SerializeToUtf8Bytes(document, IndexJsonOptions);
         var bytes = EncodeDocument(json);
         await JsonColdStoreAtomicFileWriter.WriteAsync(
-            _options.DatabaseDirectory,
+            _options,
             GetIndexPathSegments(entityName, indexName),
             bytes,
-            _options.FsyncOnWrite,
             cancellationToken);
     }
 

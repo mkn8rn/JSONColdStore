@@ -25,6 +25,29 @@ public sealed class JsonColdStoreAtomicFileWriterTests
     }
 
     [Fact]
+    public async Task WriteAsyncWithOptionsPublishesReadableBytes()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .UseFlushRetry(maxRetries: 1, baseDelay: TimeSpan.Zero)
+            .Build();
+        var payload = "stored option bytes"u8.ToArray();
+
+        await JsonColdStoreAtomicFileWriter.WriteAsync(
+            options,
+            ["Entity", "record.jcs"],
+            payload);
+
+        var read = await JsonColdStoreAtomicFileWriter.ReadAsync(
+            options,
+            ["Entity", "record.jcs"]);
+
+        Assert.Equal(payload, read);
+        Assert.Empty(Directory.GetFiles(Path.Combine(root, "Entity"), "*.tmp-*"));
+    }
+
+    [Fact]
     public async Task WriteAsyncRejectsTraversalOutsideDatabaseDirectory()
     {
         var root = NewTempDirectory();

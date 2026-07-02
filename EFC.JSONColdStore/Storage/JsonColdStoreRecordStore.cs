@@ -141,6 +141,10 @@ internal sealed class JsonColdStoreRecordStore
             _options.DatabaseDirectory,
             [.. GetRecordPathSegments(entityName, recordId)]);
 
+        JsonColdStoreFileGuard.ThrowIfReparsePoint(
+            path,
+            "The JSONColdStore current record cannot be a reparse point.");
+
         return File.Exists(path);
     }
 
@@ -152,7 +156,7 @@ internal sealed class JsonColdStoreRecordStore
             JsonColdStoreNameEncoder.EncodePathSegment(entityName),
             "records");
 
-        return Directory.Exists(recordsDirectory)
+        return CurrentRecordsDirectoryExistsAndIsSafe(recordsDirectory)
             && Directory.EnumerateFiles(recordsDirectory, "*.jcs").Any();
     }
 
@@ -174,7 +178,7 @@ internal sealed class JsonColdStoreRecordStore
             JsonColdStoreNameEncoder.EncodePathSegment(entityName),
             "records");
 
-        if (!Directory.Exists(recordsDirectory))
+        if (!CurrentRecordsDirectoryExistsAndIsSafe(recordsDirectory))
             yield break;
 
         foreach (var recordPath in Directory.EnumerateFiles(recordsDirectory, "*.jcs").Order(StringComparer.Ordinal))
@@ -195,6 +199,20 @@ internal sealed class JsonColdStoreRecordStore
 
             yield return new JsonColdStoreRecord(recordId, decoded);
         }
+    }
+
+    private static bool CurrentRecordsDirectoryExistsAndIsSafe(string recordsDirectory)
+    {
+        if (!Directory.Exists(recordsDirectory))
+            return false;
+
+        if (JsonColdStoreDirectoryWalker.IsReparsePoint(recordsDirectory))
+        {
+            throw new JsonColdStoreUnsafePathException(
+                "The JSONColdStore current records directory cannot be a reparse point.");
+        }
+
+        return true;
     }
 
     internal async Task<JsonColdStoreStartupValidationResult> VerifyAllRecordsAsync(

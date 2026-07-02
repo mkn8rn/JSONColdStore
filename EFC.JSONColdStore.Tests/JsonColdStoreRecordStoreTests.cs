@@ -109,6 +109,36 @@ public sealed class JsonColdStoreRecordStoreTests
     }
 
     [Fact]
+    public async Task RecordExistsRejectsReparsePointRecordFile()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var recordPath = JsonColdStorePathValidator.GetSafeChildPath(
+            root,
+            [.. JsonColdStoreRecordStore.GetRecordPathSegments("Entity", "linked-exists")]);
+        Directory.CreateDirectory(Path.GetDirectoryName(recordPath)!);
+        var outsideFile = Path.Combine(outside, "outside.jcs");
+        await File.WriteAllTextAsync(outsideFile, "outside-record-exists");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredFileLink(
+            recordPath,
+            outsideFile,
+            nameof(RecordExistsRejectsReparsePointRecordFile));
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseCompression(JsonColdStoreCompression.None)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+
+        var exception = Assert.Throws<JsonColdStoreUnsafePathException>(
+            () => store.RecordExists("Entity", "linked-exists"));
+
+        Assert.Contains("current record", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(recordPath, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside-record-exists", await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
     public async Task ReadRecordAsyncRetriesTransientReadLock()
     {
         var root = NewTempDirectory();
@@ -319,6 +349,64 @@ public sealed class JsonColdStoreRecordStoreTests
             records.Add(record);
 
         Assert.Empty(records);
+    }
+
+    [Fact]
+    public async Task ReadAllRecordsAsyncRejectsReparsePointRecordsDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var recordsDirectory = CurrentRecordsDirectory(root, "Entity");
+        Directory.CreateDirectory(Path.GetDirectoryName(recordsDirectory)!);
+        var outsideFile = Path.Combine(outside, "outside.jcs");
+        await File.WriteAllTextAsync(outsideFile, "outside-scan-payload");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            recordsDirectory,
+            outside,
+            nameof(ReadAllRecordsAsyncRejectsReparsePointRecordsDirectory));
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(async () =>
+        {
+            await foreach (var _ in store.ReadAllRecordsAsync("Entity"))
+            {
+            }
+        });
+
+        Assert.Contains("records directory", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(recordsDirectory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside-scan-payload", await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
+    public async Task EntityHasRecordsRejectsReparsePointRecordsDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var recordsDirectory = CurrentRecordsDirectory(root, "Entity");
+        Directory.CreateDirectory(Path.GetDirectoryName(recordsDirectory)!);
+        var outsideFile = Path.Combine(outside, "outside.jcs");
+        await File.WriteAllTextAsync(outsideFile, "outside-entity-has-records");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            recordsDirectory,
+            outside,
+            nameof(EntityHasRecordsRejectsReparsePointRecordsDirectory));
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreRecordStore(options);
+
+        var exception = Assert.Throws<JsonColdStoreUnsafePathException>(
+            () => store.EntityHasRecords("Entity"));
+
+        Assert.Contains("records directory", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(recordsDirectory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside-entity-has-records", await File.ReadAllTextAsync(outsideFile));
     }
 
     [Fact]
@@ -901,6 +989,13 @@ public sealed class JsonColdStoreRecordStoreTests
 
     private static string StagedPath(string root, Guid manifestId) =>
         Path.Combine(root, "_transactions", "staged", manifestId.ToString("N") + ".jcs");
+
+    private static string CurrentRecordsDirectory(string root, string entityName) =>
+        JsonColdStorePathValidator.GetSafeChildPath(
+            root,
+            "entities",
+            JsonColdStoreNameEncoder.EncodePathSegment(entityName),
+            "records");
 
     private static async Task<string> ReadOnlyEventLogTextAsync(string root)
     {

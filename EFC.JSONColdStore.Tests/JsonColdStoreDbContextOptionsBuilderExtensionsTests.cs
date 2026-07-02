@@ -1086,6 +1086,37 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task ScanJsonColdStoreAsyncRejectsReparsePointCurrentRecordsDirectory()
+    {
+        var directory = TestDirectory("facade-scan-reparse-current-records-" + Guid.NewGuid().ToString("N"));
+        var outside = TestDirectory("facade-scan-reparse-current-records-target-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using (var setupContext = new WritableDbContext(builder.Options))
+        {
+            setupContext.Database.EnsureCreated();
+        }
+
+        var recordsDirectory = CurrentRecordsDirectory(directory, typeof(WritableEntity).FullName!);
+        Directory.CreateDirectory(Path.GetDirectoryName(recordsDirectory)!);
+        var outsideFile = Path.Combine(outside, "outside.jcs");
+        await WriteTextFileAsync(outsideFile, "outside scan current record");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            recordsDirectory,
+            outside,
+            nameof(ScanJsonColdStoreAsyncRejectsReparsePointCurrentRecordsDirectory));
+
+        using var context = new WritableDbContext(builder.Options);
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => context.Database.ScanJsonColdStoreAsync<WritableEntity>());
+
+        Assert.Contains("records directory", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(recordsDirectory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside scan current record", await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
     public async Task ScanJsonColdStoreAsyncIgnoresUnsafeLegacyRecordFileNames()
     {
         var directory = TestDirectory("facade-scan-unsafe-legacy-" + Guid.NewGuid().ToString("N"));
@@ -1286,6 +1317,37 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         Assert.Equal(2, result.VerifiedRecords);
         Assert.Equal(0, result.VerifiedLegacyRecords);
         Assert.Equal(2, result.VerifiedIndexes);
+    }
+
+    [Fact]
+    public async Task VerifyJsonColdStoreAsyncRejectsReparsePointCurrentRecordsDirectory()
+    {
+        var directory = TestDirectory("verify-reparse-current-records-" + Guid.NewGuid().ToString("N"));
+        var outside = TestDirectory("verify-reparse-current-records-target-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using (var setupContext = new WritableDbContext(builder.Options))
+        {
+            setupContext.Database.EnsureCreated();
+        }
+
+        var recordsDirectory = CurrentRecordsDirectory(directory, typeof(WritableEntity).FullName!);
+        Directory.CreateDirectory(Path.GetDirectoryName(recordsDirectory)!);
+        var outsideFile = Path.Combine(outside, "outside.jcs");
+        await WriteTextFileAsync(outsideFile, "outside verify current record");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            recordsDirectory,
+            outside,
+            nameof(VerifyJsonColdStoreAsyncRejectsReparsePointCurrentRecordsDirectory));
+
+        using var context = new WritableDbContext(builder.Options);
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => context.Database.VerifyJsonColdStoreAsync());
+
+        Assert.Contains("records directory", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(recordsDirectory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside verify current record", await File.ReadAllTextAsync(outsideFile));
     }
 
     [Fact]
@@ -3347,6 +3409,9 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
             [.. JsonColdStoreRecordStore.GetRecordPathSegments(
                 entityName,
                 recordId)]);
+
+    private static string CurrentRecordsDirectory(string directory, string entityName) =>
+        Path.GetDirectoryName(CurrentRecordPath(directory, entityName, "probe"))!;
 
     private static async Task WriteTextFileAsync(string path, string contents)
     {

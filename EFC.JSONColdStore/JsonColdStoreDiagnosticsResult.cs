@@ -74,6 +74,9 @@ public sealed record JsonColdStoreDiagnosticsResult
     /// <summary>Number of orphaned atomic writer temp files outside snapshots.</summary>
     public int TemporaryFileCount { get; init; }
 
+    /// <summary>Number of unsafe path entries skipped while reading diagnostics.</summary>
+    public int SkippedUnsafePathCount { get; init; }
+
     /// <summary>Per-entity redacted diagnostics for the current EF model.</summary>
     public required IReadOnlyList<JsonColdStoreEntityDiagnostics> Entities { get; init; }
 }
@@ -100,4 +103,7 @@ public sealed record JsonColdStoreEntityDiagnostics
 
     /// <summary>Number of compatible legacy record files for this entity.</summary>
     public int LegacyRecordFileCount { get; init; }
+
+    /// <summary>Number of unsafe entity path entries skipped while reading diagnostics.</summary>
+    public int SkippedUnsafePathCount { get; init; }
 }

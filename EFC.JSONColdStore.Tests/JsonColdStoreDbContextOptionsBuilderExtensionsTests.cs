@@ -1682,6 +1682,7 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         var diagnostics = await context.Database.GetJsonColdStoreDiagnosticsAsync();
 
         Assert.Equal(2, diagnostics.TemporaryFileCount);
+        Assert.Equal(0, diagnostics.SkippedUnsafePathCount);
         Assert.True(File.Exists(rootTemp));
         Assert.True(File.Exists(nestedTemp));
         Assert.True(File.Exists(snapshotTemp));
@@ -1707,6 +1708,8 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         Assert.Equal(1, diagnostics.FailedManifestCount);
         Assert.Equal(1, diagnostics.StagedWriteCount);
         Assert.Equal(1, diagnostics.QuarantineFileCount);
+        Assert.Equal(0, diagnostics.SkippedUnsafePathCount);
+        Assert.Equal(0, diagnostics.Entities[0].SkippedUnsafePathCount);
         Assert.False(File.Exists(Path.Combine(directory, "_store.json")));
         Assert.False(File.Exists(Path.Combine(directory, "_model.json")));
     }
@@ -1778,6 +1781,7 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
 
         using var context = new WritableDbContext(builder.Options);
         var diagnostics = await context.Database.GetJsonColdStoreDiagnosticsAsync();
+        var serialized = JsonSerializer.Serialize(diagnostics);
 
         Assert.Equal(0, diagnostics.RecordFileCount);
         Assert.Equal(0, diagnostics.IndexFileCount);
@@ -1788,9 +1792,15 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         Assert.Equal(0, diagnostics.QuarantineFileCount);
         Assert.Equal(0, diagnostics.EventLogFileCount);
         Assert.Equal(0, diagnostics.SnapshotCount);
+        Assert.Equal(0, diagnostics.TemporaryFileCount);
         Assert.Equal(0, diagnostics.Entities[0].RecordFileCount);
         Assert.Equal(0, diagnostics.Entities[0].IndexFileCount);
         Assert.Equal(0, diagnostics.Entities[0].LegacyRecordFileCount);
+        Assert.Equal(9, diagnostics.SkippedUnsafePathCount);
+        Assert.Equal(3, diagnostics.Entities[0].SkippedUnsafePathCount);
+        Assert.DoesNotContain(directory, serialized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, serialized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("outside", serialized, StringComparison.OrdinalIgnoreCase);
         Assert.Equal("outside record", await File.ReadAllTextAsync(outsideRecord));
         Assert.Equal("outside index", await File.ReadAllTextAsync(outsideIndex));
         Assert.Equal("outside legacy", await File.ReadAllTextAsync(outsideLegacy));

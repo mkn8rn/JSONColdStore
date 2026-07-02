@@ -22,9 +22,17 @@ internal sealed class JsonColdStoreDiagnosticsStore
     {
         var metadataDiagnostics = await TryReadMetadataAsync(cancellationToken).ConfigureAwait(false);
         var metadata = metadataDiagnostics.Metadata;
+        var skippedUnsafePaths = CreatePathSet();
         var entityDiagnostics = _modelDescriptor.Entities
-            .Select(CreateEntityDiagnostics)
+            .Select(descriptor => CreateEntityDiagnostics(descriptor, skippedUnsafePaths))
             .ToArray();
+        var pendingManifests = CountFiles(skippedUnsafePaths, "_transactions", "pending", "*.json");
+        var failedManifests = CountFiles(skippedUnsafePaths, "_transactions", "failed", "*.json");
+        var stagedWrites = CountFiles(skippedUnsafePaths, "_transactions", "staged", "*.jcs");
+        var quarantineFiles = CountFiles(skippedUnsafePaths, "_quarantine", "records", "*.jcs");
+        var snapshots = CountDirectories(skippedUnsafePaths, "_snapshots");
+        var eventLogs = CountFiles(skippedUnsafePaths, "_events", "*.jsonl");
+        var temporaryFiles = CountTemporaryFiles(_options.DatabaseDirectory, skippedUnsafePaths);
 
         return new JsonColdStoreDiagnosticsResult
         {
@@ -45,13 +53,14 @@ internal sealed class JsonColdStoreDiagnosticsStore
             RecordFileCount = entityDiagnostics.Sum(entity => entity.RecordFileCount),
             IndexFileCount = entityDiagnostics.Sum(entity => entity.IndexFileCount),
             LegacyRecordFileCount = entityDiagnostics.Sum(entity => entity.LegacyRecordFileCount),
-            PendingManifestCount = CountFiles("_transactions", "pending", "*.json"),
-            FailedManifestCount = CountFiles("_transactions", "failed", "*.json"),
-            StagedWriteCount = CountFiles("_transactions", "staged", "*.jcs"),
-            QuarantineFileCount = CountFiles("_quarantine", "records", "*.jcs"),
-            SnapshotCount = CountDirectories("_snapshots"),
-            EventLogFileCount = CountFiles("_events", "*.jsonl"),
-            TemporaryFileCount = CountTemporaryFiles(_options.DatabaseDirectory),
+            PendingManifestCount = pendingManifests.Count,
+            FailedManifestCount = failedManifests.Count,
+            StagedWriteCount = stagedWrites.Count,
+            QuarantineFileCount = quarantineFiles.Count,
+            SnapshotCount = snapshots,
+            EventLogFileCount = eventLogs.Count,
+            TemporaryFileCount = temporaryFiles.Count,
+            SkippedUnsafePathCount = skippedUnsafePaths.Count,
             Entities = entityDiagnostics,
         };
     }
@@ -94,28 +103,41 @@ internal sealed class JsonColdStoreDiagnosticsStore
             or CryptographicException;
 
     private JsonColdStoreEntityDiagnostics CreateEntityDiagnostics(
-        JsonColdStoreEntityDescriptor descriptor)
+        JsonColdStoreEntityDescriptor descriptor,
+        ISet<string> skippedUnsafePaths)
     {
+        var recordFiles = CountFiles(
+            skippedUnsafePaths,
+            "entities",
+            JsonColdStoreNameEncoder.EncodePathSegment(descriptor.EntityName),
+            "records",
+            "*.jcs");
+        var indexFiles = CountFiles(
+            skippedUnsafePaths,
+            "entities",
+            JsonColdStoreNameEncoder.EncodePathSegment(descriptor.EntityName),
+            "indexes",
+            "*.json");
+        var legacyRecordFiles = CountLegacyRecords(descriptor, skippedUnsafePaths);
+
         return new JsonColdStoreEntityDiagnostics
         {
             EntityName = descriptor.EntityName,
             ClrTypeName = descriptor.ClrType.FullName ?? descriptor.ClrType.Name,
             DeclaredIndexCount = descriptor.Indexes.Count,
-            RecordFileCount = CountFiles(
-                "entities",
-                JsonColdStoreNameEncoder.EncodePathSegment(descriptor.EntityName),
-                "records",
-                "*.jcs"),
-            IndexFileCount = CountFiles(
-                "entities",
-                JsonColdStoreNameEncoder.EncodePathSegment(descriptor.EntityName),
-                "indexes",
-                "*.json"),
-            LegacyRecordFileCount = CountLegacyRecords(descriptor),
+            RecordFileCount = recordFiles.Count,
+            IndexFileCount = indexFiles.Count,
+            LegacyRecordFileCount = legacyRecordFiles.Count,
+            SkippedUnsafePathCount =
+                recordFiles.SkippedUnsafePathCount
+                + indexFiles.SkippedUnsafePathCount
+                + legacyRecordFiles.SkippedUnsafePathCount,
         };
     }
 
-    private int CountLegacyRecords(JsonColdStoreEntityDescriptor descriptor)
+    private DiagnosticCounter CountLegacyRecords(
+        JsonColdStoreEntityDescriptor descriptor,
+        ISet<string> skippedUnsafePaths)
     {
         var legacyDirectory = JsonColdStorePathValidator.GetSafeChildPath(
             _options.DatabaseDirectory,
@@ -124,10 +146,13 @@ internal sealed class JsonColdStoreDiagnosticsStore
         return CountFilesInDirectory(
             legacyDirectory,
             "*.json",
+            skippedUnsafePaths,
             JsonColdStoreLegacyRecordNames.IsSafeRecordFile);
     }
 
-    private int CountFiles(params string[] pathSegmentsAndPattern)
+    private DiagnosticCounter CountFiles(
+        ISet<string> skippedUnsafePaths,
+        params string[] pathSegmentsAndPattern)
     {
         if (pathSegmentsAndPattern.Length < 2)
             throw new ArgumentException("A directory path and search pattern are required.", nameof(pathSegmentsAndPattern));
@@ -138,64 +163,107 @@ internal sealed class JsonColdStoreDiagnosticsStore
             _options.DatabaseDirectory,
             directorySegments);
 
-        return CountFilesInDirectory(directory, pattern);
+        return CountFilesInDirectory(directory, pattern, skippedUnsafePaths);
     }
 
-    private int CountDirectories(params string[] pathSegments)
+    private int CountDirectories(
+        ISet<string> skippedUnsafePaths,
+        params string[] pathSegments)
     {
         var directory = JsonColdStorePathValidator.GetSafeChildPath(
             _options.DatabaseDirectory,
             pathSegments);
 
-        if (!DirectoryExistsAndIsSafe(directory))
+        if (!DirectoryExistsAndIsSafe(directory, skippedUnsafePaths))
             return 0;
 
         try
         {
-            return Directory.EnumerateDirectories(directory)
-                .Count(directory => !JsonColdStoreDirectoryWalker.IsReparsePoint(directory));
+            var count = 0;
+            foreach (var childDirectory in Directory.EnumerateDirectories(directory))
+            {
+                if (JsonColdStoreDirectoryWalker.IsReparsePoint(childDirectory))
+                {
+                    RecordSkippedUnsafePath(skippedUnsafePaths, childDirectory);
+                    continue;
+                }
+
+                count++;
+            }
+
+            return count;
         }
         catch (IOException)
         {
+            RecordSkippedUnsafePath(skippedUnsafePaths, directory);
             return 0;
         }
         catch (UnauthorizedAccessException)
         {
+            RecordSkippedUnsafePath(skippedUnsafePaths, directory);
             return 0;
         }
     }
 
-    private static int CountFilesInDirectory(
+    private static DiagnosticCounter CountFilesInDirectory(
         string directory,
         string pattern,
+        ISet<string> skippedUnsafePaths,
         Func<string, bool>? shouldCountFile = null)
     {
-        if (!DirectoryExistsAndIsSafe(directory))
-            return 0;
+        var skippedBeforeDirectoryCheck = skippedUnsafePaths.Count;
+        if (!DirectoryExistsAndIsSafe(directory, skippedUnsafePaths))
+        {
+            return new DiagnosticCounter(
+                0,
+                skippedUnsafePaths.Count - skippedBeforeDirectoryCheck);
+        }
 
         try
         {
-            return Directory.EnumerateFiles(directory, pattern)
-                .Count(file => !JsonColdStoreDirectoryWalker.IsReparsePoint(file)
-                    && (shouldCountFile?.Invoke(file) ?? true));
+            var count = 0;
+            var skipped = 0;
+            foreach (var file in Directory.EnumerateFiles(directory, pattern))
+            {
+                if (JsonColdStoreDirectoryWalker.IsReparsePoint(file))
+                {
+                    skipped += RecordSkippedUnsafePath(skippedUnsafePaths, file);
+                    continue;
+                }
+
+                if (shouldCountFile?.Invoke(file) ?? true)
+                    count++;
+            }
+
+            return new DiagnosticCounter(count, skipped);
         }
         catch (IOException)
         {
-            return 0;
+            return new DiagnosticCounter(
+                0,
+                RecordSkippedUnsafePath(skippedUnsafePaths, directory));
         }
         catch (UnauthorizedAccessException)
         {
-            return 0;
+            return new DiagnosticCounter(
+                0,
+                RecordSkippedUnsafePath(skippedUnsafePaths, directory));
         }
     }
 
-    private static bool DirectoryExistsAndIsSafe(string directory)
+    private static bool DirectoryExistsAndIsSafe(
+        string directory,
+        ISet<string> skippedUnsafePaths)
     {
         try
         {
             var attributes = File.GetAttributes(directory);
-            return (attributes & FileAttributes.Directory) != 0
+            var safe = (attributes & FileAttributes.Directory) != 0
                 && (attributes & FileAttributes.ReparsePoint) == 0;
+            if (!safe)
+                RecordSkippedUnsafePath(skippedUnsafePaths, directory);
+
+            return safe;
         }
         catch (FileNotFoundException)
         {
@@ -207,33 +275,88 @@ internal sealed class JsonColdStoreDiagnosticsStore
         }
         catch (IOException)
         {
+            RecordSkippedUnsafePath(skippedUnsafePaths, directory);
             return false;
         }
         catch (UnauthorizedAccessException)
         {
+            RecordSkippedUnsafePath(skippedUnsafePaths, directory);
             return false;
         }
     }
 
-    private static int CountTemporaryFiles(string directory)
+    private static DiagnosticCounter CountTemporaryFiles(
+        string directory,
+        ISet<string> skippedUnsafePaths)
     {
         if (!Directory.Exists(directory))
-            return 0;
+            return DiagnosticCounter.Empty;
 
         var count = 0;
-        foreach (var file in JsonColdStoreDirectoryWalker.EnumerateFiles(
-                     directory,
-                     shouldSkipDirectory: IsSnapshotDirectory))
+        var skipped = 0;
+        try
         {
-            if (Path.GetFileName(file).Contains(".tmp-", StringComparison.Ordinal))
-                count++;
-        }
+            foreach (var file in Directory.EnumerateFiles(directory))
+            {
+                if (JsonColdStoreDirectoryWalker.IsReparsePoint(file))
+                {
+                    skipped += RecordSkippedUnsafePath(skippedUnsafePaths, file);
+                    continue;
+                }
 
-        return count;
+                if (Path.GetFileName(file).Contains(".tmp-", StringComparison.Ordinal))
+                    count++;
+            }
+
+            foreach (var childDirectory in Directory.EnumerateDirectories(directory))
+            {
+                if (IsSnapshotDirectory(childDirectory))
+                    continue;
+
+                if (JsonColdStoreDirectoryWalker.IsReparsePoint(childDirectory))
+                {
+                    skipped += RecordSkippedUnsafePath(skippedUnsafePaths, childDirectory);
+                    continue;
+                }
+
+                var childCount = CountTemporaryFiles(childDirectory, skippedUnsafePaths);
+                count += childCount.Count;
+                skipped += childCount.SkippedUnsafePathCount;
+            }
+
+            return new DiagnosticCounter(count, skipped);
+        }
+        catch (IOException)
+        {
+            return new DiagnosticCounter(
+                count,
+                skipped + RecordSkippedUnsafePath(skippedUnsafePaths, directory));
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return new DiagnosticCounter(
+                count,
+                skipped + RecordSkippedUnsafePath(skippedUnsafePaths, directory));
+        }
     }
 
     private static bool IsSnapshotDirectory(string directory) =>
         string.Equals(Path.GetFileName(directory), "_snapshots", StringComparison.Ordinal);
+
+    private static HashSet<string> CreatePathSet() =>
+        new(OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal);
+
+    private static int RecordSkippedUnsafePath(ISet<string> skippedUnsafePaths, string path) =>
+        skippedUnsafePaths.Add(Path.GetFullPath(path)) ? 1 : 0;
+
+    private readonly record struct DiagnosticCounter(
+        int Count,
+        int SkippedUnsafePathCount)
+    {
+        internal static DiagnosticCounter Empty { get; } = new(0, 0);
+    }
 
     private sealed record JsonColdStoreMetadataDiagnostics(
         bool Exists,

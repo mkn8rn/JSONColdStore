@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using EFC.JSONColdStore;
 using EFC.JSONColdStore.Storage;
 
@@ -6,6 +7,70 @@ namespace EFC.JSONColdStore.Tests;
 
 public sealed class JsonColdStoreIndexStoreTests
 {
+    [Fact]
+    public async Task ReadRecordIdsAsyncReturnsEmptyWhenIndexDocumentIsMissing()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreIndexStore(options, protectDocuments: false);
+
+        var recordIds = await store.ReadRecordIdsAsync("Entity", "Value", "missing");
+        var allRecordIds = await store.ReadAllRecordIdsAsync("Entity", "Value");
+        var buckets = await store.ReadBucketsAsync("Entity", "Value");
+
+        Assert.Empty(recordIds);
+        Assert.Empty(allRecordIds);
+        Assert.Empty(buckets);
+        Assert.False(File.Exists(IndexPath(root, "Entity", "Value")));
+    }
+
+    [Fact]
+    public async Task ReadRecordIdsAsyncRejectsReparsePointIndexDocumentDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var outsideFile = Path.Combine(outside, "outside-index.txt");
+        await File.WriteAllTextAsync(outsideFile, "outside index directory payload");
+        var indexPath = IndexPath(root, "Entity", "Value");
+        Directory.CreateDirectory(Path.GetDirectoryName(indexPath)!);
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            indexPath,
+            outside,
+            nameof(ReadRecordIdsAsyncRejectsReparsePointIndexDocumentDirectory));
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreIndexStore(options, protectDocuments: false);
+
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => store.ReadRecordIdsAsync("Entity", "Value", "consumer"));
+
+        Assert.Contains("index document", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(root, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(indexPath, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("outside index directory payload", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside index directory payload", await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
+    public async Task ReadRecordIdsAsyncRejectsCorruptIndexDocument()
+    {
+        var root = NewTempDirectory();
+        var indexPath = IndexPath(root, "Entity", "Value");
+        Directory.CreateDirectory(Path.GetDirectoryName(indexPath)!);
+        await File.WriteAllTextAsync(indexPath, "not valid json");
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var store = new JsonColdStoreIndexStore(options, protectDocuments: false);
+
+        await Assert.ThrowsAsync<JsonException>(
+            () => store.ReadRecordIdsAsync("Entity", "Value", "consumer"));
+    }
+
     [Fact]
     public async Task ProtectedReadAcceptsPlaintextDocumentAndNextWriteProtectsIt()
     {

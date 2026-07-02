@@ -99,10 +99,7 @@ internal sealed class JsonColdStoreIndexStore
             throw new ArgumentException("An index name is required.", nameof(indexName));
 
         var path = GetIndexPath(entityName, indexName);
-        JsonColdStoreFileGuard.ThrowIfReparsePoint(
-            path,
-            "The JSONColdStore index document cannot be a reparse point.");
-        return File.Exists(path);
+        return IndexDocumentFileExists(path);
     }
 
     internal async Task<IReadOnlyList<string>> ReadAllRecordIdsAsync(
@@ -143,7 +140,7 @@ internal sealed class JsonColdStoreIndexStore
         CancellationToken cancellationToken)
     {
         var path = GetIndexPath(entityName, indexName);
-        if (!File.Exists(path))
+        if (!IndexDocumentFileExists(path))
             return new JsonColdStoreIndexDocument(new Dictionary<string, List<string>>(StringComparer.Ordinal));
 
         var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(_options, path, cancellationToken);
@@ -210,6 +207,14 @@ internal sealed class JsonColdStoreIndexStore
         JsonColdStorePathValidator.GetSafeChildPath(
             _options.DatabaseDirectory,
             [.. GetIndexPathSegments(entityName, indexName)]);
+
+    private static bool IndexDocumentFileExists(string path)
+    {
+        JsonColdStoreFileGuard.ThrowIfReparsePoint(
+            path,
+            "The JSONColdStore index document cannot be a reparse point.");
+        return File.Exists(path);
+    }
 
     private static string[] GetIndexPathSegments(string entityName, string indexName) =>
     [

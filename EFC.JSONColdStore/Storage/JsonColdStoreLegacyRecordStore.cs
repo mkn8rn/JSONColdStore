@@ -176,7 +176,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
             _options.DatabaseDirectory,
             descriptor.ClrType.Name,
             $"_index_{index.StorageName}.json");
-        if (!File.Exists(shardPath))
+        if (!LegacyIndexShardFileExists(shardPath))
             return JsonColdStoreLegacyIndexLookup.FallbackToScan;
 
         Dictionary<string, List<string>>? shard;
@@ -365,7 +365,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
             Path.GetFileName(entityDirectory),
             $"_index_{indexName}",
             $"{guidKey:D}.json");
-        if (!File.Exists(shardPath))
+        if (!LegacyIndexShardFileExists(shardPath))
             return JsonColdStoreLegacyIndexLookup.FromIndex([]);
 
         List<string>? recordIds;
@@ -385,7 +385,8 @@ internal sealed class JsonColdStoreLegacyRecordStore
     }
 
     private static bool IsRecoverableLegacyIndexReadFailure(Exception exception) =>
-        exception is IOException
+        exception is not JsonColdStoreUnsafePathException
+        && exception is IOException
             or UnauthorizedAccessException
             or JsonException
             or InvalidDataException;
@@ -487,6 +488,14 @@ internal sealed class JsonColdStoreLegacyRecordStore
             rowsPath,
             "The legacy shared rows existence target cannot be a reparse point.");
         return File.Exists(rowsPath);
+    }
+
+    private static bool LegacyIndexShardFileExists(string shardPath)
+    {
+        JsonColdStoreFileGuard.ThrowIfReparsePoint(
+            shardPath,
+            "The legacy index shard existence target cannot be a reparse point.");
+        return File.Exists(shardPath);
     }
 
     private string GetEntityDirectory(JsonColdStoreEntityDescriptor descriptor) =>

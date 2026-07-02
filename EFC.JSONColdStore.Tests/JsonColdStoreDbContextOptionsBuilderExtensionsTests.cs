@@ -2815,6 +2815,28 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncScansLegacyRecordsWhenLegacyIndexShardIsMissing()
+    {
+        var directory = TestDirectory("legacy-missing-index-" + Guid.NewGuid().ToString("N"));
+        var matchId = Guid.Parse("70000000-0000-0000-0000-000000000014");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = matchId,
+            Value = "legacy-missing-index-match",
+        });
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var matches = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            "Value",
+            "legacy-missing-index-match");
+
+        Assert.Single(matches);
+        Assert.Equal(matchId, matches[0].Id);
+    }
+
+    [Fact]
     public async Task ReadJsonColdStoreIndexAsyncFiltersLegacyRecordInWrongBucket()
     {
         var directory = TestDirectory("legacy-index-wrong-bucket-" + Guid.NewGuid().ToString("N"));
@@ -2866,6 +2888,132 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         Assert.Equal(matchId, matches[0].Id);
         Assert.False(File.Exists(Path.Combine(directory, "_store.json")));
         Assert.False(File.Exists(Path.Combine(directory, "_model.json")));
+    }
+
+    [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncReturnsEmptyWhenLegacyKeyScopedShardIsMissing()
+    {
+        var directory = TestDirectory("legacy-missing-key-scoped-index-" + Guid.NewGuid().ToString("N"));
+        var matchId = Guid.Parse("70000000-0000-0000-0000-000000000015");
+        var indexKey = Guid.Parse("71000000-0000-0000-0000-000000000004");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = matchId,
+            Value = indexKey.ToString(),
+        });
+        Directory.CreateDirectory(Path.Combine(directory, nameof(WritableEntity), "_index_Value"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var matches = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            "Value",
+            indexKey.ToString());
+
+        Assert.Empty(matches);
+    }
+
+    [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncReturnsEmptyWhenLegacyKeyScopedValueIsNotGuid()
+    {
+        var directory = TestDirectory("legacy-key-scoped-index-nonguid-" + Guid.NewGuid().ToString("N"));
+        var matchId = Guid.Parse("70000000-0000-0000-0000-000000000016");
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = matchId,
+            Value = "legacy-key-not-guid",
+        });
+        Directory.CreateDirectory(Path.Combine(directory, nameof(WritableEntity), "_index_Value"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var matches = await context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            "Value",
+            "legacy-key-not-guid");
+
+        Assert.Empty(matches);
+    }
+
+    [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncRejectsReparsePointLegacyIndexShard()
+    {
+        var directory = TestDirectory("legacy-linked-index-" + Guid.NewGuid().ToString("N"));
+        var outside = TestDirectory("legacy-linked-index-outside-" + Guid.NewGuid().ToString("N"));
+        var matchId = Guid.Parse("70000000-0000-0000-0000-000000000017");
+        var outsidePayload = "outside legacy flat shard payload";
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = matchId,
+            Value = "legacy-linked-index-match",
+        });
+        Directory.CreateDirectory(outside);
+        var outsideFile = Path.Combine(outside, "outside-index.json");
+        await File.WriteAllTextAsync(outsideFile, outsidePayload);
+        var shardPath = Path.Combine(directory, nameof(WritableEntity), "_index_Value.json");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredFileLink(
+            shardPath,
+            outsideFile,
+            nameof(ReadJsonColdStoreIndexAsyncRejectsReparsePointLegacyIndexShard));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+                "Value",
+                "legacy-linked-index-match"));
+
+        AssertRedactedLegacyIndexShardException(
+            exception,
+            directory,
+            shardPath,
+            outsideFile,
+            outsidePayload);
+        Assert.True(File.Exists(shardPath));
+        Assert.Equal(outsidePayload, await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
+    public async Task ReadJsonColdStoreIndexAsyncRejectsReparsePointLegacyKeyScopedIndexShard()
+    {
+        var directory = TestDirectory("legacy-linked-key-scoped-index-" + Guid.NewGuid().ToString("N"));
+        var outside = TestDirectory("legacy-linked-key-scoped-index-outside-" + Guid.NewGuid().ToString("N"));
+        var matchId = Guid.Parse("70000000-0000-0000-0000-000000000018");
+        var indexKey = Guid.Parse("71000000-0000-0000-0000-000000000005");
+        var outsidePayload = "outside legacy key scoped shard payload";
+        await WriteLegacyEntityAsync(directory, new WritableEntity
+        {
+            Id = matchId,
+            Value = indexKey.ToString(),
+        });
+        var indexDirectory = Path.Combine(directory, nameof(WritableEntity), "_index_Value");
+        Directory.CreateDirectory(indexDirectory);
+        Directory.CreateDirectory(outside);
+        var outsideFile = Path.Combine(outside, "outside-key-index.json");
+        await File.WriteAllTextAsync(outsideFile, outsidePayload);
+        var shardPath = Path.Combine(indexDirectory, $"{indexKey:D}.json");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredFileLink(
+            shardPath,
+            outsideFile,
+            nameof(ReadJsonColdStoreIndexAsyncRejectsReparsePointLegacyKeyScopedIndexShard));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var exception = await Assert.ThrowsAsync<JsonColdStoreUnsafePathException>(
+            () => context.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+                "Value",
+                indexKey.ToString()));
+
+        AssertRedactedLegacyIndexShardException(
+            exception,
+            directory,
+            shardPath,
+            outsideFile,
+            outsidePayload);
+        Assert.True(File.Exists(shardPath));
+        Assert.Equal(outsidePayload, await File.ReadAllTextAsync(outsideFile));
     }
 
     [Fact]
@@ -4046,6 +4194,20 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         await File.WriteAllTextAsync(
             Path.Combine(indexDirectory, $"{indexKey:D}.json"),
             JsonSerializer.Serialize(recordIds.ToList(), new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static void AssertRedactedLegacyIndexShardException(
+        JsonColdStoreUnsafePathException exception,
+        string directory,
+        string shardPath,
+        string outsideFile,
+        string outsidePayload)
+    {
+        Assert.Contains("legacy index shard", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(directory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(shardPath, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outsideFile, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outsidePayload, exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<string> CorruptStoredRecordAsync(string directory, Guid id)

@@ -25,9 +25,25 @@ internal sealed class JsonColdStoreDiagnosticsStore
     internal async Task<JsonColdStoreDiagnosticsResult> ReadAsync(
         CancellationToken cancellationToken = default)
     {
+        var skippedUnsafePaths = CreatePathSet();
+        if (!DatabaseRootExistsAndIsSafe(_options.DatabaseDirectory, skippedUnsafePaths))
+        {
+            return CreateResult(
+                new JsonColdStoreMetadataDiagnostics(false, false, null),
+                CreateEmptyEntityDiagnostics(),
+                DiagnosticCounter.Empty,
+                DiagnosticCounter.Empty,
+                DiagnosticCounter.Empty,
+                DiagnosticCounter.Empty,
+                snapshots: 0,
+                DiagnosticCounter.Empty,
+                DiagnosticCounter.Empty,
+                DiagnosticCounter.Empty,
+                skippedUnsafePaths);
+        }
+
         var metadataDiagnostics = await TryReadMetadataAsync(cancellationToken).ConfigureAwait(false);
         var metadata = metadataDiagnostics.Metadata;
-        var skippedUnsafePaths = CreatePathSet();
         var entityDiagnostics = _modelDescriptor.Entities
             .Select(descriptor => CreateEntityDiagnostics(descriptor, skippedUnsafePaths))
             .ToArray();
@@ -42,6 +58,34 @@ internal sealed class JsonColdStoreDiagnosticsStore
             ? CountPlaintextProtectedDocuments(skippedUnsafePaths)
             : DiagnosticCounter.Empty;
 
+        return CreateResult(
+            metadataDiagnostics,
+            entityDiagnostics,
+            pendingManifests,
+            failedManifests,
+            stagedWrites,
+            quarantineFiles,
+            snapshots,
+            eventLogs,
+            temporaryFiles,
+            plaintextProtectedDocuments,
+            skippedUnsafePaths);
+    }
+
+    private JsonColdStoreDiagnosticsResult CreateResult(
+        JsonColdStoreMetadataDiagnostics metadataDiagnostics,
+        IReadOnlyList<JsonColdStoreEntityDiagnostics> entityDiagnostics,
+        DiagnosticCounter pendingManifests,
+        DiagnosticCounter failedManifests,
+        DiagnosticCounter stagedWrites,
+        DiagnosticCounter quarantineFiles,
+        int snapshots,
+        DiagnosticCounter eventLogs,
+        DiagnosticCounter temporaryFiles,
+        DiagnosticCounter plaintextProtectedDocuments,
+        ISet<string> skippedUnsafePaths)
+    {
+        var metadata = metadataDiagnostics.Metadata;
         return new JsonColdStoreDiagnosticsResult
         {
             HasStoreMetadata = metadataDiagnostics.Exists,
@@ -57,7 +101,7 @@ internal sealed class JsonColdStoreDiagnosticsStore
             KeyedIntegrityEnabled = _options.Integrity.Key is not null,
             StartupMode = metadata?.Policy.StartupMode ?? _options.StartupMode,
             FullScanPolicy = metadata?.Policy.FullScanPolicy ?? _options.FullScanPolicy,
-            MappedEntityCount = entityDiagnostics.Length,
+            MappedEntityCount = entityDiagnostics.Count,
             RecordFileCount = entityDiagnostics.Sum(entity => entity.RecordFileCount),
             IndexFileCount = entityDiagnostics.Sum(entity => entity.IndexFileCount),
             LegacyRecordFileCount = entityDiagnostics.Sum(entity => entity.LegacyRecordFileCount),
@@ -77,6 +121,16 @@ internal sealed class JsonColdStoreDiagnosticsStore
             Entities = entityDiagnostics,
         };
     }
+
+    private JsonColdStoreEntityDiagnostics[] CreateEmptyEntityDiagnostics() =>
+        _modelDescriptor.Entities
+            .Select(descriptor => new JsonColdStoreEntityDiagnostics
+            {
+                EntityName = descriptor.EntityName,
+                ClrTypeName = descriptor.ClrType.FullName ?? descriptor.ClrType.Name,
+                DeclaredIndexCount = descriptor.Indexes.Count,
+            })
+            .ToArray();
 
     private async Task<JsonColdStoreMetadataDiagnostics> TryReadMetadataAsync(
         CancellationToken cancellationToken)
@@ -114,6 +168,41 @@ internal sealed class JsonColdStoreDiagnosticsStore
             or NotSupportedException
             or InvalidOperationException
             or CryptographicException;
+
+    private static bool DatabaseRootExistsAndIsSafe(
+        string databaseDirectory,
+        ISet<string> skippedUnsafePaths)
+    {
+        var root = JsonColdStorePathValidator.NormalizeDatabaseDirectory(databaseDirectory);
+        try
+        {
+            var attributes = File.GetAttributes(root);
+            var safe = (attributes & FileAttributes.Directory) != 0
+                && (attributes & FileAttributes.ReparsePoint) == 0;
+            if (!safe)
+                RecordSkippedUnsafePath(skippedUnsafePaths, root);
+
+            return safe;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            RecordSkippedUnsafePath(skippedUnsafePaths, root);
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            RecordSkippedUnsafePath(skippedUnsafePaths, root);
+            return false;
+        }
+    }
 
     private JsonColdStoreEntityDiagnostics CreateEntityDiagnostics(
         JsonColdStoreEntityDescriptor descriptor,

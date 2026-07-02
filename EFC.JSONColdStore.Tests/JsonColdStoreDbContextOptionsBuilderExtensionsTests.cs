@@ -1868,6 +1868,85 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task GetJsonColdStoreDiagnosticsAsyncSkipsReparsePointDatabaseRoot()
+    {
+        var parent = TestDirectory("diagnostics-root-reparse-parent-" + Guid.NewGuid().ToString("N"));
+        var outside = TestDirectory("diagnostics-root-reparse-target-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(parent);
+        Directory.CreateDirectory(outside);
+        await WriteTextFileAsync(
+            Path.Combine(outside, JsonColdStoreCatalog.StoreFileName),
+            """{"outsideRootSecret":true}""");
+        await WriteLegacyEntityAsync(
+            outside,
+            new WritableEntity
+            {
+                Id = Guid.Parse("53000000-0000-0000-0000-000000000008"),
+                Value = "outside-root-legacy",
+                Score = 58,
+            });
+        await WriteTextFileAsync(
+            Path.Combine(outside, "_transactions", "pending", "outside.json"),
+            "outside pending");
+        var link = Path.Combine(parent, "linked-store");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            link,
+            outside,
+            nameof(GetJsonColdStoreDiagnosticsAsyncSkipsReparsePointDatabaseRoot));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(link, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var diagnostics = await context.Database.GetJsonColdStoreDiagnosticsAsync();
+        var serialized = JsonSerializer.Serialize(diagnostics);
+
+        Assert.False(diagnostics.HasStoreMetadata);
+        Assert.False(diagnostics.StoreMetadataReadable);
+        Assert.False(diagnostics.StoreMetadataProtected);
+        Assert.Equal(1, diagnostics.MappedEntityCount);
+        Assert.Equal(0, diagnostics.RecordFileCount);
+        Assert.Equal(0, diagnostics.IndexFileCount);
+        Assert.Equal(0, diagnostics.LegacyRecordFileCount);
+        Assert.Equal(0, diagnostics.PendingManifestCount);
+        Assert.Equal(0, diagnostics.TemporaryFileCount);
+        Assert.Equal(1, diagnostics.SkippedUnsafePathCount);
+        Assert.Equal(0, diagnostics.Entities[0].SkippedUnsafePathCount);
+        Assert.DoesNotContain(link, serialized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outside, serialized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("outsideRootSecret", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("outside-root-legacy", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("outside pending", serialized, StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(outside, JsonColdStoreCatalog.StoreFileName)));
+        Assert.True(Directory.Exists(Path.Combine(outside, nameof(WritableEntity))));
+        Assert.False(Directory.Exists(Path.Combine(outside, "_locks")));
+    }
+
+    [Fact]
+    public async Task GetJsonColdStoreDiagnosticsAsyncReturnsEmptyForMissingDatabaseRoot()
+    {
+        var directory = TestDirectory("diagnostics-missing-root-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using var context = new WritableDbContext(builder.Options);
+        var diagnostics = await context.Database.GetJsonColdStoreDiagnosticsAsync();
+
+        Assert.False(Directory.Exists(directory));
+        Assert.False(diagnostics.HasStoreMetadata);
+        Assert.False(diagnostics.StoreMetadataReadable);
+        Assert.False(diagnostics.StoreMetadataProtected);
+        Assert.Equal(1, diagnostics.MappedEntityCount);
+        Assert.Equal(0, diagnostics.RecordFileCount);
+        Assert.Equal(0, diagnostics.IndexFileCount);
+        Assert.Equal(0, diagnostics.LegacyRecordFileCount);
+        Assert.Equal(0, diagnostics.PendingManifestCount);
+        Assert.Equal(0, diagnostics.TemporaryFileCount);
+        Assert.Equal(0, diagnostics.SkippedUnsafePathCount);
+        var entity = Assert.Single(diagnostics.Entities);
+        Assert.Equal(0, entity.SkippedUnsafePathCount);
+    }
+
+    [Fact]
     public async Task GetJsonColdStoreDiagnosticsAsyncCountsPlaintextProtectedDocumentsWithoutRemovingCompatibility()
     {
         var directory = TestDirectory("diagnostics-plaintext-protected-" + Guid.NewGuid().ToString("N"));

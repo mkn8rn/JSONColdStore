@@ -274,6 +274,59 @@ public sealed class JsonColdStoreEntityRecordStoreTests
     }
 
     [Fact]
+    public async Task DeleteRecordIfExistsRejectsReparsePointLegacyRecordFile()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var descriptor = JsonColdStoreModelDescriptor.Create(CreateModel())
+            .FindEntity(typeof(ConsumerEvent));
+        var legacyDirectory = Path.Combine(root, nameof(ConsumerEvent));
+        Directory.CreateDirectory(legacyDirectory);
+        var outsideFile = Path.Combine(outside, "outside.json");
+        await File.WriteAllTextAsync(outsideFile, "outside-legacy-record");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredFileLink(
+            Path.Combine(legacyDirectory, "legacy-delete.json"),
+            outsideFile,
+            nameof(DeleteRecordIfExistsRejectsReparsePointLegacyRecordFile));
+        var legacyStore = new JsonColdStoreLegacyRecordStore(options);
+
+        Assert.Throws<JsonColdStoreUnsafePathException>(
+            () => legacyStore.DeleteRecordIfExists(descriptor, "legacy-delete"));
+
+        Assert.Equal("outside-legacy-record", await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
+    public async Task DeleteSharedRowsIfExistsRejectsReparsePointLegacyRowsDocument()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var descriptor = JsonColdStoreModelDescriptor.Create(CreateSharedRowsModel())
+            .Entities
+            .Single(entity => entity.IsSharedType);
+        var legacyDirectory = Path.Combine(root, descriptor.EntityName);
+        Directory.CreateDirectory(legacyDirectory);
+        var outsideFile = Path.Combine(outside, "_rows.json");
+        await File.WriteAllTextAsync(outsideFile, "outside-legacy-rows");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredFileLink(
+            Path.Combine(legacyDirectory, "_rows.json"),
+            outsideFile,
+            nameof(DeleteSharedRowsIfExistsRejectsReparsePointLegacyRowsDocument));
+        var legacyStore = new JsonColdStoreLegacyRecordStore(options);
+
+        Assert.Throws<JsonColdStoreUnsafePathException>(
+            () => legacyStore.DeleteSharedRowsIfExists(descriptor));
+
+        Assert.Equal("outside-legacy-rows", await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
     public async Task RebuildIndexesAsyncRecreatesMissingIndexEntries()
     {
         var root = NewTempDirectory();
@@ -377,6 +430,21 @@ public sealed class JsonColdStoreEntityRecordStoreTests
             entity.HasKey(value => value.Id);
             entity.Property(value => value.Payload);
         });
+
+        return modelBuilder.FinalizeModel();
+    }
+
+    private static IModel CreateSharedRowsModel()
+    {
+        var modelBuilder = new ModelBuilder(new ConventionSet());
+        modelBuilder.SharedTypeEntity<Dictionary<string, object>>(
+            "ConsumerEventTag",
+            entity =>
+            {
+                entity.IndexerProperty<Guid>("ConsumerEventId");
+                entity.IndexerProperty<Guid>("TagId");
+                entity.HasKey("ConsumerEventId", "TagId");
+            });
 
         return modelBuilder.FinalizeModel();
     }

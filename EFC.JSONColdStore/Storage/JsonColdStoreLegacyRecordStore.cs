@@ -194,6 +194,9 @@ internal sealed class JsonColdStoreLegacyRecordStore
             return;
 
         var recordPath = GetRecordPath(descriptor, recordId);
+        JsonColdStoreFileGuard.ThrowIfReparsePoint(
+            recordPath,
+            "The legacy record delete target cannot be a reparse point.");
         if (File.Exists(recordPath))
             File.Delete(recordPath);
     }
@@ -205,6 +208,9 @@ internal sealed class JsonColdStoreLegacyRecordStore
             return;
 
         var rowsPath = GetSharedRowsPath(descriptor);
+        JsonColdStoreFileGuard.ThrowIfReparsePoint(
+            rowsPath,
+            "The legacy shared rows delete target cannot be a reparse point.");
         if (File.Exists(rowsPath))
             File.Delete(rowsPath);
     }

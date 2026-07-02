@@ -3913,6 +3913,105 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public void LinqSkipAfterTakeThrowsInsteadOfReorderingPaging()
+    {
+        var directory = TestDirectory("query-skip-after-take-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseFullScanPolicy(JsonColdStoreScanPolicy.AllowSilentScans));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000020"),
+                Value = "first",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000021"),
+                Value = "second",
+            });
+        context.SaveChanges();
+
+        var exception = Assert.Throws<NotSupportedException>(
+            () => context.Entities
+                .Take(1)
+                .Skip(1)
+                .ToList());
+
+        Assert.Contains("Skipping after Take", exception.Message);
+    }
+
+    [Fact]
+    public async Task LinqSkipAfterTakeAsyncThrowsInsteadOfReorderingPaging()
+    {
+        var directory = TestDirectory("query-async-skip-after-take-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseFullScanPolicy(JsonColdStoreScanPolicy.AllowSilentScans));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000022"),
+                Value = "first",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000023"),
+                Value = "second",
+            });
+        context.SaveChanges();
+
+        var exception = await Assert.ThrowsAsync<NotSupportedException>(
+            () => context.Entities
+                .Take(1)
+                .Skip(1)
+                .ToListAsync());
+
+        Assert.Contains("Skipping after Take", exception.Message);
+    }
+
+    [Fact]
+    public void LinqSkipBeforeTakeStillWorks()
+    {
+        var directory = TestDirectory("query-skip-before-take-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseFullScanPolicy(JsonColdStoreScanPolicy.AllowSilentScans));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000024"),
+                Value = "first",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000025"),
+                Value = "second",
+            });
+        context.SaveChanges();
+
+        var values = context.Entities
+            .Skip(1)
+            .Take(1)
+            .Select(entity => entity.Value)
+            .ToList();
+
+        Assert.Equal(["second"], values);
+    }
+
+    [Fact]
     public void LinqProjectionUsesDeclaredIndexWithoutSilentScan()
     {
         var directory = TestDirectory("query-projection-index-" + Guid.NewGuid().ToString("N"));

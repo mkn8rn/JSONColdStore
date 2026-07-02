@@ -805,6 +805,8 @@ internal sealed record JsonColdStoreQueryPlan(
                 var builder = Parse(call.Arguments[0]);
                 if (builder.Skip is not null)
                     throw Unsupported("Only one Skip operator is supported.");
+                if (builder.Take is not null)
+                    throw Unsupported("Skipping after Take is not supported.");
 
                 builder.Skip = call.Arguments[1];
                 return builder;

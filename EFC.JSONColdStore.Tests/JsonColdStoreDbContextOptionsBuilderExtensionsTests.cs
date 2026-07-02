@@ -3766,6 +3766,153 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public void LinqWhereAfterTakeThrowsInsteadOfReorderingOperators()
+    {
+        var directory = TestDirectory("query-where-after-take-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseFullScanPolicy(JsonColdStoreScanPolicy.AllowSilentScans));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000011"),
+                Value = "first",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000012"),
+                Value = "second",
+            });
+        context.SaveChanges();
+
+        var exception = Assert.Throws<NotSupportedException>(
+            () => context.Entities
+                .Take(1)
+                .Where(entity => entity.Value == "second")
+                .ToList());
+
+        Assert.Contains("Filtering after paging", exception.Message);
+    }
+
+    [Fact]
+    public async Task LinqWhereAfterSkipAsyncThrowsInsteadOfReorderingOperators()
+    {
+        var directory = TestDirectory("query-async-where-after-skip-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseFullScanPolicy(JsonColdStoreScanPolicy.AllowSilentScans));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000013"),
+                Value = "first",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000014"),
+                Value = "second",
+            });
+        context.SaveChanges();
+
+        var exception = await Assert.ThrowsAsync<NotSupportedException>(
+            () => context.Entities
+                .Skip(1)
+                .Where(entity => entity.Value == "second")
+                .ToListAsync());
+
+        Assert.Contains("Filtering after paging", exception.Message);
+    }
+
+    [Fact]
+    public void LinqPredicateTerminalAfterTakeThrowsInsteadOfReorderingOperators()
+    {
+        var directory = TestDirectory("query-terminal-after-take-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseFullScanPolicy(JsonColdStoreScanPolicy.AllowSilentScans));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000015"),
+                Value = "first",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000016"),
+                Value = "second",
+            });
+        context.SaveChanges();
+
+        var exception = Assert.Throws<NotSupportedException>(
+            () => context.Entities
+                .Take(1)
+                .Any(entity => entity.Value == "second"));
+
+        Assert.Contains("Predicate filtering after paging", exception.Message);
+    }
+
+    [Fact]
+    public async Task LinqPredicateTerminalAfterSkipAsyncThrowsInsteadOfReorderingOperators()
+    {
+        var directory = TestDirectory("query-async-terminal-after-skip-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseFullScanPolicy(JsonColdStoreScanPolicy.AllowSilentScans));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.AddRange(
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000017"),
+                Value = "first",
+            },
+            new WritableEntity
+            {
+                Id = Guid.Parse("82000000-0000-0000-0000-000000000018"),
+                Value = "second",
+            });
+        context.SaveChanges();
+
+        var exception = await Assert.ThrowsAsync<NotSupportedException>(
+            () => context.Entities
+                .Skip(1)
+                .CountAsync(entity => entity.Value == "second"));
+
+        Assert.Contains("Predicate filtering after paging", exception.Message);
+    }
+
+    [Fact]
+    public void LinqTerminalWithoutPredicateAfterTakeStillWorks()
+    {
+        var directory = TestDirectory("query-terminal-after-take-no-predicate-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+        context.Entities.Add(new WritableEntity
+        {
+            Id = Guid.Parse("82000000-0000-0000-0000-000000000019"),
+            Value = "first",
+        });
+        context.SaveChanges();
+
+        Assert.True(context.Entities.Take(1).Any());
+    }
+
+    [Fact]
     public void LinqProjectionUsesDeclaredIndexWithoutSilentScan()
     {
         var directory = TestDirectory("query-projection-index-" + Guid.NewGuid().ToString("N"));

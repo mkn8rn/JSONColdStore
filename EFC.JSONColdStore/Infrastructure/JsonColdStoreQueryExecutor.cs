@@ -776,6 +776,8 @@ internal sealed record JsonColdStoreQueryPlan(
                 var builder = Parse(call.Arguments[0]);
                 if (builder.Projection is not null)
                     throw Unsupported("Filtering after projection is not supported.");
+                if (builder.Skip is not null || builder.Take is not null)
+                    throw Unsupported("Filtering after paging is not supported.");
 
                 AddFilters(builder, call.Arguments[1]);
                 return builder;
@@ -841,6 +843,8 @@ internal sealed record JsonColdStoreQueryPlan(
                 {
                     if (builder.Projection is not null)
                         throw Unsupported("Predicate terminals after projection are not supported.");
+                    if (builder.Skip is not null || builder.Take is not null)
+                        throw Unsupported("Predicate filtering after paging is not supported.");
 
                     AddFilters(builder, call.Arguments[1]);
                 }

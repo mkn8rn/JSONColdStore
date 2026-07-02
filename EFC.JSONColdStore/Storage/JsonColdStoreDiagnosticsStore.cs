@@ -150,7 +150,8 @@ internal sealed class JsonColdStoreDiagnosticsStore
             pathSegments);
 
         return Directory.Exists(directory)
-            ? Directory.EnumerateDirectories(directory).Count()
+            ? Directory.EnumerateDirectories(directory)
+                .Count(directory => !JsonColdStoreDirectoryWalker.IsReparsePoint(directory))
             : 0;
     }
 
@@ -159,19 +160,20 @@ internal sealed class JsonColdStoreDiagnosticsStore
         if (!Directory.Exists(directory))
             return 0;
 
-        var count = Directory.EnumerateFiles(directory)
-            .Count(path => Path.GetFileName(path).Contains(".tmp-", StringComparison.Ordinal));
-
-        foreach (var childDirectory in Directory.EnumerateDirectories(directory))
+        var count = 0;
+        foreach (var file in JsonColdStoreDirectoryWalker.EnumerateFiles(
+                     directory,
+                     shouldSkipDirectory: IsSnapshotDirectory))
         {
-            if (string.Equals(Path.GetFileName(childDirectory), "_snapshots", StringComparison.Ordinal))
-                continue;
-
-            count += CountTemporaryFiles(childDirectory);
+            if (Path.GetFileName(file).Contains(".tmp-", StringComparison.Ordinal))
+                count++;
         }
 
         return count;
     }
+
+    private static bool IsSnapshotDirectory(string directory) =>
+        string.Equals(Path.GetFileName(directory), "_snapshots", StringComparison.Ordinal);
 
     private sealed record JsonColdStoreMetadataDiagnostics(
         bool Exists,

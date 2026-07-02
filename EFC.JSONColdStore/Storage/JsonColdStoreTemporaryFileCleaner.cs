@@ -8,8 +8,13 @@ internal static class JsonColdStoreTemporaryFileCleaner
             return 0;
 
         var deleted = 0;
-        foreach (var file in EnumerateTempFiles(databaseDirectory))
+        foreach (var file in JsonColdStoreDirectoryWalker.EnumerateFiles(
+                     databaseDirectory,
+                     shouldSkipDirectory: IsSnapshotDirectory))
         {
+            if (!Path.GetFileName(file).Contains(".tmp-", StringComparison.Ordinal))
+                continue;
+
             try
             {
                 File.Delete(file);
@@ -26,21 +31,6 @@ internal static class JsonColdStoreTemporaryFileCleaner
         return deleted;
     }
 
-    private static IEnumerable<string> EnumerateTempFiles(string directory)
-    {
-        foreach (var file in Directory.EnumerateFiles(directory).Order(StringComparer.Ordinal))
-        {
-            if (Path.GetFileName(file).Contains(".tmp-", StringComparison.Ordinal))
-                yield return file;
-        }
-
-        foreach (var childDirectory in Directory.EnumerateDirectories(directory).Order(StringComparer.Ordinal))
-        {
-            if (string.Equals(Path.GetFileName(childDirectory), "_snapshots", StringComparison.Ordinal))
-                continue;
-
-            foreach (var file in EnumerateTempFiles(childDirectory))
-                yield return file;
-        }
-    }
+    private static bool IsSnapshotDirectory(string directory) =>
+        string.Equals(Path.GetFileName(directory), "_snapshots", StringComparison.Ordinal);
 }

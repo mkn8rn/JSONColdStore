@@ -219,10 +219,7 @@ internal sealed class JsonColdStoreRecordStore
             : _options;
         var verifiedRecords = 0;
 
-        foreach (var recordPath in Directory.EnumerateFiles(
-                     entitiesDirectory,
-                     "*.jcs",
-                     SearchOption.AllDirectories).Order(StringComparer.Ordinal))
+        foreach (var recordPath in JsonColdStoreDirectoryWalker.EnumerateFiles(entitiesDirectory, "*.jcs"))
         {
             cancellationToken.ThrowIfCancellationRequested();
             _ = DecodeCurrentRecordId(recordPath);
@@ -264,11 +261,7 @@ internal sealed class JsonColdStoreRecordStore
         };
         var verifiedRecords = 0;
         var quarantinedRecords = 0;
-        var recordPaths = Directory.EnumerateFiles(
-                entitiesDirectory,
-                "*.jcs",
-                SearchOption.AllDirectories)
-            .Order(StringComparer.Ordinal)
+        var recordPaths = JsonColdStoreDirectoryWalker.EnumerateFiles(entitiesDirectory, "*.jcs")
             .ToArray();
 
         foreach (var recordPath in recordPaths)

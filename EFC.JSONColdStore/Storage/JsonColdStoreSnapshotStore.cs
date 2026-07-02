@@ -21,6 +21,8 @@ internal sealed class JsonColdStoreSnapshotStore
             _options.DatabaseDirectory,
             SnapshotDirectoryName);
         Directory.CreateDirectory(snapshotRoot);
+        if (JsonColdStoreDirectoryWalker.IsReparsePoint(snapshotRoot))
+            throw new UnauthorizedAccessException("The JSONColdStore snapshot directory cannot be a reparse point.");
 
         var snapshotName = DateTimeOffset.UtcNow.ToString(
             "yyyyMMddHHmmssfffffff",
@@ -92,6 +94,7 @@ internal sealed class JsonColdStoreSnapshotStore
     {
         var retentionCount = _options.Snapshots.RetentionCount;
         var snapshotDirectories = Directory.EnumerateDirectories(snapshotRoot)
+            .Where(directory => !JsonColdStoreDirectoryWalker.IsReparsePoint(directory))
             .OrderByDescending(Path.GetFileName, StringComparer.Ordinal)
             .ToArray();
         var deleted = 0;
@@ -125,24 +128,20 @@ internal sealed class JsonColdStoreSnapshotStore
 
     private static IEnumerable<string> EnumerateSnapshotSourceFiles(string directory)
     {
-        foreach (var file in Directory.EnumerateFiles(directory).Order(StringComparer.Ordinal))
+        foreach (var file in JsonColdStoreDirectoryWalker.EnumerateFiles(
+                     directory,
+                     shouldSkipDirectory: IsSkippedSnapshotDirectory))
         {
             if (!IsTemporaryFile(file))
                 yield return file;
         }
+    }
 
-        foreach (var childDirectory in Directory.EnumerateDirectories(directory).Order(StringComparer.Ordinal))
-        {
-            var name = Path.GetFileName(childDirectory);
-            if (string.Equals(name, SnapshotDirectoryName, StringComparison.Ordinal)
-                || string.Equals(name, LockDirectoryName, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            foreach (var file in EnumerateSnapshotSourceFiles(childDirectory))
-                yield return file;
-        }
+    private static bool IsSkippedSnapshotDirectory(string directory)
+    {
+        var name = Path.GetFileName(directory);
+        return string.Equals(name, SnapshotDirectoryName, StringComparison.Ordinal)
+            || string.Equals(name, LockDirectoryName, StringComparison.Ordinal);
     }
 
     private static bool IsTemporaryFile(string path) =>

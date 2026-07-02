@@ -40,6 +40,9 @@ internal sealed class JsonColdStoreLegacyRecordStore
         if (!JsonColdStoreLegacyRecordNames.IsSafeRecordId(recordId))
             return false;
 
+        if (!LegacyDirectoryExistsAndIsSafe(GetEntityDirectory(descriptor)))
+            return false;
+
         return File.Exists(GetRecordPath(descriptor, recordId));
     }
 
@@ -50,6 +53,9 @@ internal sealed class JsonColdStoreLegacyRecordStore
     {
         ArgumentNullException.ThrowIfNull(descriptor);
         ValidateLegacyRecordId(recordId);
+        ThrowIfExistingLegacyDirectoryIsReparsePoint(
+            GetEntityDirectory(descriptor),
+            "The legacy entity directory cannot be a reparse point.");
 
         var bytes = await JsonColdStoreFileReader.ReadAllBytesAsync(
             _options,
@@ -77,7 +83,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
         }
 
         var entityDirectory = GetEntityDirectory(descriptor);
-        if (!Directory.Exists(entityDirectory))
+        if (!LegacyDirectoryExistsAndIsSafe(entityDirectory))
             yield break;
 
         foreach (var file in Directory.EnumerateFiles(entityDirectory, "*.json").Order(StringComparer.Ordinal))
@@ -101,7 +107,9 @@ internal sealed class JsonColdStoreLegacyRecordStore
     internal bool SharedRowsDocumentExists(JsonColdStoreEntityDescriptor descriptor)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
-        return descriptor.IsSharedType && File.Exists(GetSharedRowsPath(descriptor));
+        return descriptor.IsSharedType
+            && LegacyDirectoryExistsAndIsSafe(GetSharedRowsDirectory(descriptor))
+            && File.Exists(GetSharedRowsPath(descriptor));
     }
 
     internal async IAsyncEnumerable<JsonColdStoreLegacySharedRow> ReadAllSharedRowsAsync(
@@ -113,6 +121,9 @@ internal sealed class JsonColdStoreLegacyRecordStore
             yield break;
 
         var rowsPath = GetSharedRowsPath(descriptor);
+        if (!LegacyDirectoryExistsAndIsSafe(GetSharedRowsDirectory(descriptor)))
+            yield break;
+
         if (!File.Exists(rowsPath))
             yield break;
 
@@ -150,7 +161,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
         ArgumentNullException.ThrowIfNull(index);
 
         var entityDirectory = GetEntityDirectory(descriptor);
-        if (!Directory.Exists(entityDirectory))
+        if (!LegacyDirectoryExistsAndIsSafe(entityDirectory))
             return JsonColdStoreLegacyIndexLookup.FallbackToScan;
 
         var keyScoped = await TryReadKeyScopedIndexAsync(
@@ -193,6 +204,10 @@ internal sealed class JsonColdStoreLegacyRecordStore
         if (!JsonColdStoreLegacyRecordNames.IsSafeRecordId(recordId))
             return;
 
+        ThrowIfExistingLegacyDirectoryIsReparsePoint(
+            GetEntityDirectory(descriptor),
+            "The legacy entity directory cannot be a reparse point.");
+
         var recordPath = GetRecordPath(descriptor, recordId);
         JsonColdStoreFileGuard.ThrowIfReparsePoint(
             recordPath,
@@ -206,6 +221,10 @@ internal sealed class JsonColdStoreLegacyRecordStore
         ArgumentNullException.ThrowIfNull(descriptor);
         if (!descriptor.IsSharedType)
             return;
+
+        ThrowIfExistingLegacyDirectoryIsReparsePoint(
+            GetSharedRowsDirectory(descriptor),
+            "The legacy shared rows directory cannot be a reparse point.");
 
         var rowsPath = GetSharedRowsPath(descriptor);
         JsonColdStoreFileGuard.ThrowIfReparsePoint(
@@ -334,7 +353,7 @@ internal sealed class JsonColdStoreLegacyRecordStore
             _options.DatabaseDirectory,
             Path.GetFileName(entityDirectory),
             $"_index_{indexName}");
-        if (!Directory.Exists(keyScopedDirectory))
+        if (!LegacyDirectoryExistsAndIsSafe(keyScopedDirectory))
             return null;
 
         var key = Convert.ToString(indexValue, System.Globalization.CultureInfo.InvariantCulture);
@@ -457,11 +476,72 @@ internal sealed class JsonColdStoreLegacyRecordStore
             _options.DatabaseDirectory,
             GetLegacyEntityDirectoryName(descriptor));
 
+    private string GetSharedRowsDirectory(JsonColdStoreEntityDescriptor descriptor) =>
+        JsonColdStorePathValidator.GetSafeChildPath(
+            _options.DatabaseDirectory,
+            descriptor.EntityName);
+
     private string GetSharedRowsPath(JsonColdStoreEntityDescriptor descriptor) =>
         JsonColdStorePathValidator.GetSafeChildPath(
             _options.DatabaseDirectory,
             descriptor.EntityName,
             SharedRowsFileName);
+
+    private static bool LegacyDirectoryExistsAndIsSafe(string directory)
+    {
+        try
+        {
+            var attributes = File.GetAttributes(directory);
+            return (attributes & FileAttributes.Directory) != 0
+                && (attributes & FileAttributes.ReparsePoint) == 0;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static void ThrowIfExistingLegacyDirectoryIsReparsePoint(
+        string directory,
+        string message)
+    {
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(directory);
+        }
+        catch (FileNotFoundException)
+        {
+            return;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return;
+        }
+        catch (IOException)
+        {
+            throw new JsonColdStoreUnsafePathException(message);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            throw new JsonColdStoreUnsafePathException(message);
+        }
+
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new JsonColdStoreUnsafePathException(message);
+    }
 
     private static string GetLegacyEntityDirectoryName(JsonColdStoreEntityDescriptor descriptor) =>
         descriptor.IsSharedType

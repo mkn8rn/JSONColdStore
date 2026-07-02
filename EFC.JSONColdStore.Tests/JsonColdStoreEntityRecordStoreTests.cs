@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using EFC.JSONColdStore;
 using EFC.JSONColdStore.Infrastructure;
 using EFC.JSONColdStore.Storage;
@@ -327,6 +328,243 @@ public sealed class JsonColdStoreEntityRecordStoreTests
     }
 
     [Fact]
+    public async Task ReadEntityAsyncReadsNormalLegacyEntityDirectory()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var id = Guid.Parse("41000000-0000-0000-0000-000000000001");
+        await WriteLegacyConsumerEventAsync(
+            root,
+            new ConsumerEvent
+            {
+                Id = id,
+                ConsumerId = "normal-legacy-read",
+                Payload = "normal legacy payload",
+            });
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(CreateModel()));
+
+        var read = await entityStore.ReadEntityAsync<ConsumerEvent>(id);
+
+        Assert.NotNull(read);
+        Assert.Equal(id, read.Id);
+        Assert.Equal("normal-legacy-read", read.ConsumerId);
+        Assert.Equal("normal legacy payload", read.Payload);
+        Assert.True(File.Exists(GetLegacyConsumerEventPath(root, id)));
+    }
+
+    [Fact]
+    public async Task ImportLegacyRecordsAsyncImportsNormalLegacyEntityDirectory()
+    {
+        var root = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var id = Guid.Parse("41000000-0000-0000-0000-000000000002");
+        await WriteLegacyConsumerEventAsync(
+            root,
+            new ConsumerEvent
+            {
+                Id = id,
+                ConsumerId = "normal-legacy-import",
+                Payload = "normal import payload",
+            });
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+        var model = CreateModel();
+        var descriptor = JsonColdStoreModelDescriptor.Create(model)
+            .FindEntity(typeof(ConsumerEvent));
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(model));
+
+        var imported = await entityStore.ImportLegacyRecordsAsync();
+
+        Assert.Equal(1, imported);
+        Assert.True(session.Records.RecordExists(descriptor.EntityName, id.ToString()));
+        Assert.False(File.Exists(GetLegacyConsumerEventPath(root, id)));
+        var read = await entityStore.ReadEntityAsync<ConsumerEvent>(id);
+        Assert.NotNull(read);
+        Assert.Equal("normal-legacy-import", read.ConsumerId);
+    }
+
+    [Fact]
+    public async Task ReadEntityAsyncIgnoresReparsePointLegacyEntityDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var id = Guid.Parse("41000000-0000-0000-0000-000000000003");
+        var outsideFile = await WriteLegacyConsumerEventAsync(
+            outside,
+            new ConsumerEvent
+            {
+                Id = id,
+                ConsumerId = "outside-legacy-read",
+                Payload = "outside legacy payload",
+            });
+        var outsideJson = await File.ReadAllTextAsync(outsideFile);
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            Path.Combine(root, nameof(ConsumerEvent)),
+            outside,
+            nameof(ReadEntityAsyncIgnoresReparsePointLegacyEntityDirectory));
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(CreateModel()));
+
+        var read = await entityStore.ReadEntityAsync<ConsumerEvent>(id);
+
+        Assert.Null(read);
+        Assert.Equal(outsideJson, await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
+    public async Task ImportLegacyRecordsAsyncSkipsReparsePointLegacyEntityDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var id = Guid.Parse("41000000-0000-0000-0000-000000000004");
+        var outsideFile = await WriteLegacyConsumerEventAsync(
+            outside,
+            new ConsumerEvent
+            {
+                Id = id,
+                ConsumerId = "outside-legacy-import",
+                Payload = "outside import payload",
+            });
+        var outsideJson = await File.ReadAllTextAsync(outsideFile);
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            Path.Combine(root, nameof(ConsumerEvent)),
+            outside,
+            nameof(ImportLegacyRecordsAsyncSkipsReparsePointLegacyEntityDirectory));
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+        var model = CreateModel();
+        var descriptor = JsonColdStoreModelDescriptor.Create(model)
+            .FindEntity(typeof(ConsumerEvent));
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(model));
+
+        var imported = await entityStore.ImportLegacyRecordsAsync();
+
+        Assert.Equal(0, imported);
+        Assert.False(session.Records.RecordExists(descriptor.EntityName, id.ToString()));
+        Assert.Equal(outsideJson, await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
+    public async Task ImportLegacyRecordsAsyncSkipsReparsePointLegacySharedRowsDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var descriptor = JsonColdStoreModelDescriptor.Create(CreateSharedRowsModel())
+            .Entities
+            .Single(entity => entity.IsSharedType);
+        var outsideRowsPath = Path.Combine(outside, "_rows.json");
+        await File.WriteAllTextAsync(
+            outsideRowsPath,
+            """
+            [
+              {
+                "ConsumerEventId": "41000000-0000-0000-0000-000000000005",
+                "TagId": "41000000-0000-0000-0000-000000000006"
+              }
+            ]
+            """);
+        var outsideJson = await File.ReadAllTextAsync(outsideRowsPath);
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            Path.Combine(root, descriptor.EntityName),
+            outside,
+            nameof(ImportLegacyRecordsAsyncSkipsReparsePointLegacySharedRowsDirectory));
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(options);
+        var entityStore = new JsonColdStoreEntityRecordStore(
+            session,
+            JsonColdStoreModelDescriptor.Create(CreateSharedRowsModel()));
+
+        var imported = await entityStore.ImportLegacyRecordsAsync();
+        var storedRows = 0;
+        await foreach (var _ in session.Records.ReadAllNamedRecordsAsync(
+            descriptor.EntityName,
+            CancellationToken.None))
+        {
+            storedRows++;
+        }
+
+        Assert.Equal(0, imported);
+        Assert.Equal(0, storedRows);
+        Assert.Equal(outsideJson, await File.ReadAllTextAsync(outsideRowsPath));
+    }
+
+    [Fact]
+    public async Task DeleteRecordIfExistsRejectsReparsePointLegacyEntityDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var descriptor = JsonColdStoreModelDescriptor.Create(CreateModel())
+            .FindEntity(typeof(ConsumerEvent));
+        var id = Guid.Parse("41000000-0000-0000-0000-000000000007");
+        var outsideFile = await WriteLegacyConsumerEventAsync(
+            outside,
+            new ConsumerEvent
+            {
+                Id = id,
+                ConsumerId = "outside-delete-directory",
+                Payload = "outside delete directory payload",
+            });
+        var outsideJson = await File.ReadAllTextAsync(outsideFile);
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            Path.Combine(root, nameof(ConsumerEvent)),
+            outside,
+            nameof(DeleteRecordIfExistsRejectsReparsePointLegacyEntityDirectory));
+        var legacyStore = new JsonColdStoreLegacyRecordStore(options);
+
+        Assert.Throws<JsonColdStoreUnsafePathException>(
+            () => legacyStore.DeleteRecordIfExists(descriptor, id.ToString()));
+
+        Assert.Equal(outsideJson, await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
+    public async Task DeleteSharedRowsIfExistsRejectsReparsePointLegacyRowsDirectory()
+    {
+        var root = NewTempDirectory();
+        var outside = NewTempDirectory();
+        var options = new JsonColdStoreOptionsBuilder(root)
+            .UseFsyncOnWrite(false)
+            .Build();
+        var descriptor = JsonColdStoreModelDescriptor.Create(CreateSharedRowsModel())
+            .Entities
+            .Single(entity => entity.IsSharedType);
+        var outsideRowsPath = Path.Combine(outside, "_rows.json");
+        await File.WriteAllTextAsync(outsideRowsPath, "outside-linked-rows-directory");
+        JsonColdStoreReparsePointTestHelper.CreateRequiredDirectoryLink(
+            Path.Combine(root, descriptor.EntityName),
+            outside,
+            nameof(DeleteSharedRowsIfExistsRejectsReparsePointLegacyRowsDirectory));
+        var legacyStore = new JsonColdStoreLegacyRecordStore(options);
+
+        Assert.Throws<JsonColdStoreUnsafePathException>(
+            () => legacyStore.DeleteSharedRowsIfExists(descriptor));
+
+        Assert.Equal("outside-linked-rows-directory", await File.ReadAllTextAsync(outsideRowsPath));
+    }
+
+    [Fact]
     public async Task RebuildIndexesAsyncRecreatesMissingIndexEntries()
     {
         var root = NewTempDirectory();
@@ -455,6 +693,19 @@ public sealed class JsonColdStoreEntityRecordStoreTests
         Directory.CreateDirectory(root);
         return root;
     }
+
+    private static async Task<string> WriteLegacyConsumerEventAsync(
+        string root,
+        ConsumerEvent entity)
+    {
+        var path = GetLegacyConsumerEventPath(root, entity.Id);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllBytesAsync(path, JsonSerializer.SerializeToUtf8Bytes(entity));
+        return path;
+    }
+
+    private static string GetLegacyConsumerEventPath(string root, Guid id) =>
+        Path.Combine(root, nameof(ConsumerEvent), id + ".json");
 
     private static bool ContainsBytes(byte[] haystack, string needle) =>
         haystack.AsSpan().IndexOf(Encoding.UTF8.GetBytes(needle)) >= 0;

@@ -200,6 +200,51 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public void CanConnectReturnsTrueWhenModelCatalogIsMissing()
+    {
+        var directory = TestDirectory("can-connect-missing-model-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using (var setupContext = new WritableDbContext(builder.Options))
+        {
+            setupContext.Database.EnsureCreated();
+        }
+
+        File.Delete(Path.Combine(directory, JsonColdStoreModelCatalog.ModelFileName));
+        using var context = new WritableDbContext(builder.Options);
+
+        Assert.True(context.Database.CanConnect());
+    }
+
+    [Fact]
+    public async Task CanConnectReturnsFalseForReparsePointModelCatalog()
+    {
+        var directory = TestDirectory("can-connect-linked-model-" + Guid.NewGuid().ToString("N"));
+        var outside = TestDirectory("can-connect-linked-model-outside-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outside);
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using (var setupContext = new WritableDbContext(builder.Options))
+        {
+            setupContext.Database.EnsureCreated();
+        }
+
+        var outsideFile = Path.Combine(outside, JsonColdStoreModelCatalog.ModelFileName);
+        await File.WriteAllTextAsync(outsideFile, "outside model catalog");
+        var modelPath = Path.Combine(directory, JsonColdStoreModelCatalog.ModelFileName);
+        File.Delete(modelPath);
+        JsonColdStoreReparsePointTestHelper.CreateRequiredFileLink(
+            modelPath,
+            outsideFile,
+            nameof(CanConnectReturnsFalseForReparsePointModelCatalog));
+        using var context = new WritableDbContext(builder.Options);
+
+        Assert.False(context.Database.CanConnect());
+        Assert.False(await context.Database.CanConnectAsync());
+        Assert.Equal("outside model catalog", await File.ReadAllTextAsync(outsideFile));
+    }
+
+    [Fact]
     public async Task CanConnectReturnsTrueForLegacyEntityDirectory()
     {
         var directory = TestDirectory("can-connect-legacy-" + Guid.NewGuid().ToString("N"));
@@ -316,6 +361,40 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         Assert.False(context.Database.EnsureCreated());
         Assert.True(File.Exists(Path.Combine(directory, "_store.json")));
         Assert.True(File.Exists(Path.Combine(directory, "_model.json")));
+    }
+
+    [Fact]
+    public async Task EnsureCreatedRejectsReparsePointModelCatalog()
+    {
+        var directory = TestDirectory("ensure-created-linked-model-" + Guid.NewGuid().ToString("N"));
+        var outside = TestDirectory("ensure-created-linked-model-outside-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outside);
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using (var setupContext = new WritableDbContext(builder.Options))
+        {
+            setupContext.Database.EnsureCreated();
+        }
+
+        var outsideFile = Path.Combine(outside, JsonColdStoreModelCatalog.ModelFileName);
+        await File.WriteAllTextAsync(outsideFile, "outside ensure-created model");
+        var modelPath = Path.Combine(directory, JsonColdStoreModelCatalog.ModelFileName);
+        File.Delete(modelPath);
+        JsonColdStoreReparsePointTestHelper.CreateRequiredFileLink(
+            modelPath,
+            outsideFile,
+            nameof(EnsureCreatedRejectsReparsePointModelCatalog));
+        using var context = new WritableDbContext(builder.Options);
+
+        var exception = Assert.Throws<JsonColdStoreUnsafePathException>(
+            () => context.Database.EnsureCreated());
+
+        Assert.Contains("model catalog", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(directory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(modelPath, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(outsideFile, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("outside ensure-created model", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("outside ensure-created model", await File.ReadAllTextAsync(outsideFile));
     }
 
     [Fact]

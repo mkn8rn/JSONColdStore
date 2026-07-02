@@ -41,7 +41,7 @@ internal sealed class JsonColdStoreModelCatalog
         var expectedHash = ComputeHash(snapshot);
         var modelPath = GetModelFilePath();
 
-        if (!File.Exists(modelPath))
+        if (!ModelFileExists(modelPath))
         {
             if (!createIfMissing)
                 return false;
@@ -83,6 +83,14 @@ internal sealed class JsonColdStoreModelCatalog
 
         return document
             ?? throw new InvalidDataException("The JSONColdStore model catalog file is empty.");
+    }
+
+    private static bool ModelFileExists(string modelPath)
+    {
+        JsonColdStoreFileGuard.ThrowIfReparsePoint(
+            modelPath,
+            "The JSONColdStore model catalog cannot be a reparse point.");
+        return File.Exists(modelPath);
     }
 
     private async Task WriteAsync(

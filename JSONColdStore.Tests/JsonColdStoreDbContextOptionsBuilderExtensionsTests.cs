@@ -1421,6 +1421,57 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task LinqIncludeReferenceNavigationFirstOrDefaultAsyncPopulatesNavigation()
+    {
+        var directory = TestDirectory("query-include-reference-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<IncludeDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var adminPermissionSetId = Guid.Parse("66000000-0000-0000-0000-000000000001");
+        var userPermissionSetId = Guid.Parse("66000000-0000-0000-0000-000000000002");
+
+        using (var setupContext = new IncludeDbContext(builder.Options))
+        {
+            setupContext.PermissionSets.AddRange(
+                new IncludePermissionSet
+                {
+                    Id = adminPermissionSetId,
+                    Code = "admin-permissions",
+                },
+                new IncludePermissionSet
+                {
+                    Id = userPermissionSetId,
+                    Code = "user-permissions",
+                });
+            setupContext.Roles.AddRange(
+                new IncludeRole
+                {
+                    Id = Guid.Parse("66000000-0000-0000-0000-000000000003"),
+                    Name = "Admin",
+                    PermissionSetId = adminPermissionSetId,
+                },
+                new IncludeRole
+                {
+                    Id = Guid.Parse("66000000-0000-0000-0000-000000000004"),
+                    Name = "User",
+                    PermissionSetId = userPermissionSetId,
+                });
+            await setupContext.SaveChangesAsync();
+        }
+
+        using var context = new IncludeDbContext(builder.Options);
+        var role = await context.Roles
+            .Include(value => value.PermissionSet)
+            .FirstOrDefaultAsync(value => value.Name == "Admin");
+
+        Assert.NotNull(role);
+        Assert.Equal("Admin", role.Name);
+        Assert.Equal(adminPermissionSetId, role.PermissionSetId);
+        Assert.NotNull(role.PermissionSet);
+        Assert.Equal(adminPermissionSetId, role.PermissionSet.Id);
+        Assert.Equal("admin-permissions", role.PermissionSet.Code);
+    }
+
+    [Fact]
     public async Task SaveChangesPersistsAddedEntityThroughStorageSession()
     {
         var directory = TestDirectory("savechanges-" + Guid.NewGuid().ToString("N"));
@@ -5229,6 +5280,26 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         }
     }
 
+    private sealed class IncludeDbContext(DbContextOptions<IncludeDbContext> options) : DbContext(options)
+    {
+        public DbSet<IncludeRole> Roles => Set<IncludeRole>();
+
+        public DbSet<IncludePermissionSet> PermissionSets => Set<IncludePermissionSet>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<IncludePermissionSet>(entity => entity.HasKey(value => value.Id));
+            modelBuilder.Entity<IncludeRole>(entity =>
+            {
+                entity.HasKey(value => value.Id);
+                entity.HasIndex(value => value.Name);
+                entity.HasOne(value => value.PermissionSet)
+                    .WithMany()
+                    .HasForeignKey(value => value.PermissionSetId);
+            });
+        }
+    }
+
     private sealed class ManyToManyDbContext(DbContextOptions<ManyToManyDbContext> options) : DbContext(options)
     {
         public DbSet<ManyToManyPost> Posts => Set<ManyToManyPost>();
@@ -5304,5 +5375,23 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         public string IndexName { get; set; } = string.Empty;
 
         public string IndexValue { get; set; } = string.Empty;
+    }
+
+    private sealed class IncludeRole
+    {
+        public Guid Id { get; set; }
+
+        public string Name { get; set; } = string.Empty;
+
+        public Guid PermissionSetId { get; set; }
+
+        public IncludePermissionSet? PermissionSet { get; set; }
+    }
+
+    private sealed class IncludePermissionSet
+    {
+        public Guid Id { get; set; }
+
+        public string Code { get; set; } = string.Empty;
     }
 }

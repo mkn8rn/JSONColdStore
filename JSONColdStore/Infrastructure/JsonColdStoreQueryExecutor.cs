@@ -262,8 +262,22 @@ internal static class JsonColdStoreQueryExecutor
 
         ApplyOrdering(filtered, queryContext, plan);
         ApplyPaging(filtered, queryContext, plan);
-        if (ShouldTrackEntityResults(queryContext, entityDescriptor, plan))
+        var trackEntityResults = ShouldTrackEntityResults(queryContext, entityDescriptor, plan);
+        if (trackEntityResults)
             filtered = TrackEntityResults(queryContext, entityDescriptor, filtered);
+        if (ShouldLoadReferenceIncludes(entityDescriptor, plan))
+        {
+            await LoadReferenceIncludesAsync(
+                    entityStore,
+                    modelDescriptor,
+                    entityDescriptor,
+                    queryContext,
+                    plan,
+                    filtered,
+                    trackEntityResults,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         return filtered;
     }
@@ -439,6 +453,69 @@ internal static class JsonColdStoreQueryExecutor
         return trackingBehavior == QueryTrackingBehavior.TrackAll;
     }
 
+    private static bool ShouldLoadReferenceIncludes(
+        JsonColdStoreEntityDescriptor entityDescriptor,
+        JsonColdStoreQueryPlan plan)
+    {
+        if (plan.Includes.Count == 0 || entityDescriptor.IsSharedType || plan.Projection is not null)
+            return false;
+
+        return plan.Terminal is not (JsonColdStoreQueryTerminal.Count
+            or JsonColdStoreQueryTerminal.LongCount
+            or JsonColdStoreQueryTerminal.Any);
+    }
+
+    private static async Task LoadReferenceIncludesAsync<TEntity>(
+        JsonColdStoreEntityRecordStore entityStore,
+        JsonColdStoreModelDescriptor modelDescriptor,
+        JsonColdStoreEntityDescriptor entityDescriptor,
+        QueryContext queryContext,
+        JsonColdStoreQueryPlan plan,
+        IReadOnlyList<TEntity> results,
+        bool trackEntityResults,
+        CancellationToken cancellationToken)
+        where TEntity : class
+    {
+        if (results.Count == 0)
+            return;
+
+        foreach (var include in plan.Includes)
+        {
+            var navigation = entityDescriptor.FindReferenceNavigation(include.NavigationName)
+                ?? throw Unsupported(
+                    $"Include navigation '{include.NavigationName}' is not a supported reference navigation.");
+            var targetDescriptor = modelDescriptor.FindEntity(navigation.TargetClrType);
+            if (!navigation.PrincipalKeyPropertyNames.SequenceEqual(
+                    targetDescriptor.Key.PropertyNames,
+                    StringComparer.Ordinal))
+            {
+                throw Unsupported(
+                    $"Include navigation '{include.NavigationName}' must target the related entity primary key.");
+            }
+
+            foreach (var entity in results)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var targetKeyValue = navigation.CreateTargetKeyValue(entity);
+                if (targetKeyValue is null)
+                {
+                    navigation.SetValue(entity, null);
+                    continue;
+                }
+
+                var related = await entityStore.ReadEntityAsync(
+                        targetDescriptor,
+                        targetKeyValue,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (related is not null && trackEntityResults)
+                    related = TrackEntityResult(queryContext, targetDescriptor, related);
+
+                navigation.SetValue(entity, related);
+            }
+        }
+    }
+
     private static List<TEntity> TrackEntityResults<TEntity>(
         QueryContext queryContext,
         JsonColdStoreEntityDescriptor entityDescriptor,
@@ -451,28 +528,34 @@ internal static class JsonColdStoreQueryExecutor
         var tracked = new List<TEntity>(results.Count);
         foreach (var entity in results)
         {
-            var existing = FindTrackedEntity(queryContext, entityDescriptor, entity);
-            if (existing is not null)
-            {
-                tracked.Add(existing);
-                continue;
-            }
-
-            queryContext.Context.Attach(entity);
-            tracked.Add(entity);
+            tracked.Add((TEntity)TrackEntityResult(queryContext, entityDescriptor, entity));
         }
 
         return tracked;
     }
 
-    private static TEntity? FindTrackedEntity<TEntity>(
+    private static object TrackEntityResult(
         QueryContext queryContext,
         JsonColdStoreEntityDescriptor entityDescriptor,
-        TEntity entity)
-        where TEntity : class
+        object entity)
     {
-        foreach (var entry in queryContext.Context.ChangeTracker.Entries<TEntity>())
+        var existing = FindTrackedEntity(queryContext, entityDescriptor, entity);
+        if (existing is not null)
+            return existing;
+
+        queryContext.Context.Attach(entity);
+        return entity;
+    }
+
+    private static object? FindTrackedEntity(
+        QueryContext queryContext,
+        JsonColdStoreEntityDescriptor entityDescriptor,
+        object entity)
+    {
+        foreach (var entry in queryContext.Context.ChangeTracker.Entries())
         {
+            if (!entityDescriptor.ClrType.IsInstanceOfType(entry.Entity))
+                continue;
             if (EntityKeysEqual(entityDescriptor, entry.Entity, entity))
                 return entry.Entity;
         }
@@ -1229,6 +1312,7 @@ internal sealed record JsonColdStoreQueryPlan(
     Expression? Skip,
     Expression? Take,
     LambdaExpression? Projection,
+    IReadOnlyList<JsonColdStoreQueryInclude> Includes,
     bool Distinct,
     IReadOnlyList<JsonColdStoreUpdateAssignment> UpdateAssignments,
     JsonColdStoreQueryTerminal Terminal,
@@ -1250,6 +1334,7 @@ internal sealed record JsonColdStoreQueryPlan(
             builder.Skip,
             builder.Take,
             builder.Projection,
+            builder.Includes,
             builder.Distinct,
             builder.UpdateAssignments,
             builder.Terminal,
@@ -1350,6 +1435,25 @@ internal sealed record JsonColdStoreQueryPlan(
                     throw Unsupported("Only one projection operator is supported.");
 
                 builder.Projection = UnquoteLambda(call.Arguments[1]);
+                return builder;
+            }
+
+            case nameof(EntityFrameworkQueryableExtensions.Include):
+            {
+                if (call.Arguments.Count != 2)
+                    throw Unsupported("Include requires one navigation selector.");
+
+                var builder = Parse(call.Arguments[0]);
+                if (builder.Projection is not null)
+                    throw Unsupported("Include after projection is not supported.");
+
+                var navigationName = ParseIncludeNavigationName(call.Arguments[1]);
+                if (!builder.Includes.Any(include =>
+                        string.Equals(include.NavigationName, navigationName, StringComparison.Ordinal)))
+                {
+                    builder.Includes.Add(new JsonColdStoreQueryInclude(navigationName));
+                }
+
                 return builder;
             }
 
@@ -1576,6 +1680,24 @@ internal sealed record JsonColdStoreQueryPlan(
             ?? throw Unsupported("The LINQ query predicate is not supported.");
     }
 
+    private static string ParseIncludeNavigationName(Expression expression)
+    {
+        if (expression is ConstantExpression { Value: string navigationPath })
+        {
+            if (string.IsNullOrWhiteSpace(navigationPath) || navigationPath.Contains('.'))
+                throw Unsupported("Include only supports a direct reference navigation path.");
+
+            return navigationPath;
+        }
+
+        var lambda = UnquoteLambda(expression);
+        if (lambda.Parameters.Count != 1)
+            throw Unsupported("Include navigation selectors must use one entity parameter.");
+
+        return TryGetPropertyName(lambda.Parameters[0], lambda.Body)
+            ?? throw Unsupported("Include only supports direct reference navigation property selectors.");
+    }
+
     private static string? TryGetPropertyName(
         ParameterExpression parameter,
         Expression expression)
@@ -1617,6 +1739,8 @@ internal sealed class JsonColdStoreQueryPlanBuilder(Type entityType)
 
     internal LambdaExpression? Projection { get; set; }
 
+    internal List<JsonColdStoreQueryInclude> Includes { get; } = [];
+
     internal bool Distinct { get; set; }
 
     internal List<JsonColdStoreUpdateAssignment> UpdateAssignments { get; } = [];
@@ -1629,6 +1753,8 @@ internal sealed class JsonColdStoreQueryPlanBuilder(Type entityType)
 }
 
 internal sealed record JsonColdStoreQueryOrdering(LambdaExpression KeySelector, bool Descending);
+
+internal sealed record JsonColdStoreQueryInclude(string NavigationName);
 
 internal sealed record JsonColdStoreQuerySeek(string PropertyName, object? Value);
 

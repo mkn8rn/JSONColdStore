@@ -196,6 +196,20 @@ internal sealed class JsonColdStoreEntityRecordStore
         where TEntity : class
     {
         var descriptor = _modelDescriptor.FindEntity(typeof(TEntity));
+        return (TEntity?)await ReadEntityAsync(
+                descriptor,
+                keyValue,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<object?> ReadEntityAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        object keyValue,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+
         await EnsureModelCatalogAsync(createIfMissing: false, cancellationToken);
         var recordId = descriptor.CreateRecordId(keyValue);
         byte[] payload;
@@ -218,7 +232,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             return null;
         }
 
-        return JsonSerializer.Deserialize<TEntity>(payload, EntityReadJsonOptions);
+        return JsonSerializer.Deserialize(payload, descriptor.ClrType, EntityReadJsonOptions);
     }
 
     internal async Task<IReadOnlyList<TEntity>> ReadEntitiesByIndexAsync<TEntity>(

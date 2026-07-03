@@ -67,6 +67,13 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
             })
             .OrderBy(index => string.Join("|", index.PropertyNames), StringComparer.Ordinal)
             .ToArray();
+        var referenceNavigations = entityType.GetNavigations()
+            .Where(navigation => !navigation.IsCollection && navigation.IsOnDependent)
+            .Select(navigation => CreateReferenceNavigationDescriptor(navigation, propertiesByName))
+            .Where(navigation => navigation is not null)
+            .Cast<JsonColdStoreReferenceNavigationDescriptor>()
+            .OrderBy(navigation => navigation.Name, StringComparer.Ordinal)
+            .ToArray();
 
         return new JsonColdStoreEntityDescriptor(
             GetStorageEntityName(entityType),
@@ -74,7 +81,8 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
             entityType.HasSharedClrType,
             properties,
             new JsonColdStoreKeyDescriptor(keyProperties),
-            indexes);
+            indexes,
+            referenceNavigations);
     }
 
     private static JsonColdStorePropertyDescriptor CreatePropertyDescriptor(
@@ -102,6 +110,29 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
         !entityType.HasSharedClrType && !string.IsNullOrWhiteSpace(entityType.ClrType.FullName)
             ? entityType.ClrType.FullName
             : entityType.Name;
+
+    private static JsonColdStoreReferenceNavigationDescriptor? CreateReferenceNavigationDescriptor(
+        INavigation navigation,
+        IReadOnlyDictionary<string, JsonColdStorePropertyDescriptor> propertiesByName)
+    {
+        var propertyInfo = navigation.PropertyInfo;
+        if (propertyInfo is null || propertyInfo.GetIndexParameters().Length > 0)
+            return null;
+
+        var foreignKeyProperties = navigation.ForeignKey.Properties
+            .Select(property => propertiesByName[property.Name])
+            .ToArray();
+        var principalKeyPropertyNames = navigation.ForeignKey.PrincipalKey.Properties
+            .Select(property => property.Name)
+            .ToArray();
+
+        return new JsonColdStoreReferenceNavigationDescriptor(
+            navigation.Name,
+            navigation.TargetEntityType.ClrType,
+            propertyInfo,
+            foreignKeyProperties,
+            principalKeyPropertyNames);
+    }
 }
 
 internal sealed record JsonColdStoreEntityDescriptor(
@@ -110,7 +141,8 @@ internal sealed record JsonColdStoreEntityDescriptor(
     bool IsSharedType,
     IReadOnlyList<JsonColdStorePropertyDescriptor> Properties,
     JsonColdStoreKeyDescriptor Key,
-    IReadOnlyList<JsonColdStoreIndexDescriptor> Indexes)
+    IReadOnlyList<JsonColdStoreIndexDescriptor> Indexes,
+    IReadOnlyList<JsonColdStoreReferenceNavigationDescriptor> ReferenceNavigations)
 {
     internal string CreateRecordId(object? keyValue) => Key.CreateRecordId(keyValue);
 
@@ -152,6 +184,10 @@ internal sealed record JsonColdStoreEntityDescriptor(
             ?? throw new InvalidOperationException(
                 $"The entity type '{ClrType.FullName ?? ClrType.Name}' does not declare a JSONColdStore index on '{propertyName}'.");
     }
+
+    internal JsonColdStoreReferenceNavigationDescriptor? FindReferenceNavigation(string navigationName) =>
+        ReferenceNavigations.FirstOrDefault(navigation =>
+            string.Equals(navigation.Name, navigationName, StringComparison.Ordinal));
 }
 
 internal sealed record JsonColdStorePropertyDescriptor(
@@ -285,4 +321,30 @@ internal sealed record JsonColdStoreIndexDescriptor(
         string.Join(
             "\u001F",
             values.Select(value => Convert.ToString(value, CultureInfo.InvariantCulture) ?? "<null>"));
+}
+
+internal sealed record JsonColdStoreReferenceNavigationDescriptor(
+    string Name,
+    Type TargetClrType,
+    PropertyInfo PropertyInfo,
+    IReadOnlyList<JsonColdStorePropertyDescriptor> ForeignKeyProperties,
+    IReadOnlyList<string> PrincipalKeyPropertyNames)
+{
+    internal object? CreateTargetKeyValue(object entity)
+    {
+        var keyValues = ForeignKeyProperties
+            .Select(property => property.GetValue(entity))
+            .ToArray();
+        return keyValues.Any(value => value is null)
+            ? null
+            : keyValues.Length == 1
+                ? keyValues[0]
+                : keyValues;
+    }
+
+    internal void SetValue(object entity, object? value)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        PropertyInfo.SetValue(entity, value);
+    }
 }

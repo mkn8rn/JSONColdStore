@@ -3,8 +3,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>EFC.JSONColdStore</AssemblyName>
     <RootNamespace>EFC.JSONColdStore</RootNamespace>
-    <PackageId>JSONColdStore</PackageId>
-    <Version>0.1.0-alpha.1</Version>
+    <PackageId>EFC.JSONColdStore</PackageId>
+    <Version>0.1.0-alpha.2</Version>
     <Title>EFC.JSONColdStore</Title>
     <Authors>mkn8rn</Authors>
     <Description>EF Core provider foundation for durable local JSON cold storage.</Description>

@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="JSONColdStore/JSONColdStore.csproj" />
+  <Project Path="JSONColdStore.Tests/JSONColdStore.Tests.csproj" />
+</Solution>

@@ -1,4 +1,0 @@
-<Solution>
-  <Project Path="EFC.JSONColdStore/EFC.JSONColdStore.csproj" />
-  <Project Path="EFC.JSONColdStore.Tests/EFC.JSONColdStore.Tests.csproj" />
-</Solution>

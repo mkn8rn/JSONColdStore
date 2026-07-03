@@ -1,4 +1,4 @@
-EFC.JSONColdStore: EF Core JSON cold-store provider
+JSONColdStore: EF Core JSON cold-store provider
 Copyright (C) 2026 mkn8rn
 Contact: mkn8rn@hotmail.com
 
@@ -20,8 +20,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 WRITTEN OFFER
 
 The source code for any program binaries or compressed scripts that are
-included with EFC.JSONColdStore can be freely obtained at the following URL:
-https://github.com/mkn8rn/EFC.JSONColdStore
+included with JSONColdStore can be freely obtained at the following URL:
+https://github.com/mkn8rn/JSONColdStore
 
 =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 

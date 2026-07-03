@@ -1368,6 +1368,59 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task LinqDistinctToListAsyncUsesFilteredScalarProjection()
+    {
+        var directory = TestDirectory("query-distinct-record-key-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<ClaimStyleDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+
+        using (var setupContext = new ClaimStyleDbContext(builder.Options))
+        {
+            setupContext.IndexEntries.AddRange(
+                new ClaimStyleIndexEntry
+                {
+                    Id = Guid.Parse("65000000-0000-0000-0000-000000000010"),
+                    RecordKey = "alpha",
+                    IndexName = "status",
+                    IndexValue = "old",
+                },
+                new ClaimStyleIndexEntry
+                {
+                    Id = Guid.Parse("65000000-0000-0000-0000-000000000011"),
+                    RecordKey = "alpha",
+                    IndexName = "status",
+                    IndexValue = "patched",
+                },
+                new ClaimStyleIndexEntry
+                {
+                    Id = Guid.Parse("65000000-0000-0000-0000-000000000012"),
+                    RecordKey = "beta",
+                    IndexName = "status",
+                    IndexValue = "kept",
+                },
+                new ClaimStyleIndexEntry
+                {
+                    Id = Guid.Parse("65000000-0000-0000-0000-000000000013"),
+                    RecordKey = "outside",
+                    IndexName = "status",
+                    IndexValue = "ignored",
+                });
+            await setupContext.SaveChangesAsync();
+        }
+
+        using var context = new ClaimStyleDbContext(builder.Options);
+        var candidateKeys = new[] { "alpha", "beta" };
+        var keys = await context.IndexEntries
+            .Where(index => candidateKeys.Contains(index.RecordKey))
+            .Select(index => index.RecordKey)
+            .Distinct()
+            .ToListAsync();
+
+        Assert.Equal(["alpha", "beta"], keys.OrderBy(value => value, StringComparer.Ordinal).ToArray());
+        Assert.Equal(2, keys.Count);
+    }
+
+    [Fact]
     public async Task SaveChangesPersistsAddedEntityThroughStorageSession()
     {
         var directory = TestDirectory("savechanges-" + Guid.NewGuid().ToString("N"));

@@ -371,7 +371,8 @@ internal static class JsonColdStoreQueryExecutor
         }
 
         var projector = CreateProjection<TEntity, TElement>(queryContext, plan.Projection);
-        return results.Select(projector).ToList();
+        var projected = results.Select(projector).ToList();
+        return plan.Distinct ? projected.Distinct().ToList() : projected;
     }
 
     private static object? ApplyTerminal<TEntity, TTerminal>(
@@ -1228,6 +1229,7 @@ internal sealed record JsonColdStoreQueryPlan(
     Expression? Skip,
     Expression? Take,
     LambdaExpression? Projection,
+    bool Distinct,
     IReadOnlyList<JsonColdStoreUpdateAssignment> UpdateAssignments,
     JsonColdStoreQueryTerminal Terminal,
     QueryTrackingBehavior? TrackingBehavior,
@@ -1248,6 +1250,7 @@ internal sealed record JsonColdStoreQueryPlan(
             builder.Skip,
             builder.Take,
             builder.Projection,
+            builder.Distinct,
             builder.UpdateAssignments,
             builder.Terminal,
             builder.TrackingBehavior,
@@ -1350,6 +1353,21 @@ internal sealed record JsonColdStoreQueryPlan(
                 return builder;
             }
 
+            case nameof(Queryable.Distinct):
+            {
+                if (call.Arguments.Count != 1)
+                    throw Unsupported("Distinct with a custom comparer is not supported.");
+
+                var builder = Parse(call.Arguments[0]);
+                if (builder.Projection is null)
+                    throw Unsupported("Distinct is only supported after projection.");
+                if (builder.Distinct)
+                    throw Unsupported("Only one Distinct operator is supported.");
+
+                builder.Distinct = true;
+                return builder;
+            }
+
             case nameof(Queryable.First):
             case nameof(Queryable.FirstOrDefault):
             case nameof(Queryable.Single):
@@ -1359,6 +1377,12 @@ internal sealed record JsonColdStoreQueryPlan(
             case nameof(Queryable.Any):
             {
                 var builder = Parse(call.Arguments[0]);
+                if (builder.Distinct
+                    && methodName is nameof(Queryable.Count) or nameof(Queryable.LongCount))
+                {
+                    throw Unsupported("Count after Distinct is not supported.");
+                }
+
                 if (call.Arguments.Count == 2)
                 {
                     if (builder.Projection is not null)
@@ -1592,6 +1616,8 @@ internal sealed class JsonColdStoreQueryPlanBuilder(Type entityType)
     internal Expression? Take { get; set; }
 
     internal LambdaExpression? Projection { get; set; }
+
+    internal bool Distinct { get; set; }
 
     internal List<JsonColdStoreUpdateAssignment> UpdateAssignments { get; } = [];
 

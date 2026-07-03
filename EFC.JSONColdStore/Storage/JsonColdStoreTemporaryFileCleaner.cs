@@ -6,6 +6,11 @@ internal static class JsonColdStoreTemporaryFileCleaner
     {
         if (!Directory.Exists(databaseDirectory))
             return 0;
+        if (JsonColdStoreDirectoryWalker.IsReparsePoint(databaseDirectory))
+        {
+            throw new JsonColdStoreUnsafePathException(
+                "The JSONColdStore temporary-file cleanup root cannot be a reparse point.");
+        }
 
         var deleted = 0;
         foreach (var file in JsonColdStoreDirectoryWalker.EnumerateFiles(

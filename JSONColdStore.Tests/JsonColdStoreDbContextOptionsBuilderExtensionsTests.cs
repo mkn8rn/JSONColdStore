@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -3268,6 +3269,106 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task ExecuteUpdateAsyncUpdatesRowsMatchedByContainsIdFilter()
+    {
+        var directory = TestDirectory("execute-update-contains-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var firstId = Guid.Parse("86000000-0000-0000-0000-000000000001");
+        var secondId = Guid.Parse("86000000-0000-0000-0000-000000000002");
+        var untouchedId = Guid.Parse("86000000-0000-0000-0000-000000000003");
+        var selectedIds = new[] { firstId, secondId };
+        var now = DateTimeOffset.Parse("2026-07-03T12:34:56+00:00", CultureInfo.InvariantCulture);
+        using (var context = new WritableDbContext(builder.Options))
+        {
+            context.Entities.AddRange(
+                new WritableEntity
+                {
+                    Id = firstId,
+                    Value = "first",
+                    Score = 1,
+                },
+                new WritableEntity
+                {
+                    Id = secondId,
+                    Value = "second",
+                    Score = 2,
+                },
+                new WritableEntity
+                {
+                    Id = untouchedId,
+                    Value = "untouched",
+                    Score = 3,
+                });
+            context.SaveChanges();
+        }
+
+        using (var updateContext = new WritableDbContext(builder.Options))
+        {
+            var updated = await updateContext.Entities
+                .Where(entity => selectedIds.Contains(entity.Id))
+                .ExecuteUpdateAsync(
+                    setters => setters.SetProperty(entity => entity.AccessTokensInvalidatedAt, now));
+
+            Assert.Equal(2, updated);
+        }
+
+        using var readContext = new WritableDbContext(builder.Options);
+        var rows = await readContext.Entities
+            .Where(entity => selectedIds.Contains(entity.Id))
+            .ToListAsync();
+        var untouched = await readContext.Entities.SingleAsync(entity => entity.Id == untouchedId);
+
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, row => Assert.Equal(now, row.AccessTokensInvalidatedAt));
+        Assert.Equal("untouched", untouched.Value);
+        Assert.Null(untouched.AccessTokensInvalidatedAt);
+        Assert.Equal(3, untouched.Score);
+    }
+
+    [Fact]
+    public void ExecuteUpdateAppliesEntityValueExpressionToMatchedRows()
+    {
+        var directory = TestDirectory("execute-update-expression-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using (var context = new WritableDbContext(builder.Options))
+        {
+            context.Entities.AddRange(
+                new WritableEntity
+                {
+                    Id = Guid.Parse("86000000-0000-0000-0000-000000000004"),
+                    Value = "increment",
+                    Score = 4,
+                },
+                new WritableEntity
+                {
+                    Id = Guid.Parse("86000000-0000-0000-0000-000000000005"),
+                    Value = "skip",
+                    Score = 5,
+                });
+            context.SaveChanges();
+        }
+
+        using (var updateContext = new WritableDbContext(builder.Options))
+        {
+            var updated = updateContext.Entities
+                .Where(entity => entity.Value == "increment")
+                .ExecuteUpdate(
+                    setters => setters.SetProperty(entity => entity.Score, entity => entity.Score + 10));
+
+            Assert.Equal(1, updated);
+        }
+
+        using var readContext = new WritableDbContext(builder.Options);
+        var incremented = readContext.Entities.Single(entity => entity.Value == "increment");
+        var skipped = readContext.Entities.Single(entity => entity.Value == "skip");
+
+        Assert.Equal(14, incremented.Score);
+        Assert.Equal(5, skipped.Score);
+    }
+
+    [Fact]
     public async Task LinqCountAsyncUsesDeclaredSinglePropertyIndex()
     {
         var directory = TestDirectory("query-async-count-" + Guid.NewGuid().ToString("N"));
@@ -4597,6 +4698,7 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
             entity.HasKey(value => value.Id);
             entity.HasIndex(value => value.Value);
             entity.HasIndex(value => value.Score);
+            entity.Property(value => value.AccessTokensInvalidatedAt);
         });
         return modelBuilder.FinalizeModel();
     }
@@ -4694,5 +4796,7 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         public string Value { get; set; } = string.Empty;
 
         public int Score { get; set; }
+
+        public DateTimeOffset? AccessTokensInvalidatedAt { get; set; }
     }
 }

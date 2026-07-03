@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Globalization;
@@ -26,6 +27,14 @@ internal static class JsonColdStoreQueryExecutor
         typeof(JsonColdStoreQueryExecutor)
             .GetMethod(nameof(ExecuteTask), BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("The JSONColdStore query executor is misconfigured.");
+    private static readonly MethodInfo ExecuteUpdateTypedMethod =
+        typeof(JsonColdStoreQueryExecutor)
+            .GetMethod(nameof(ExecuteUpdateTyped), BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("The JSONColdStore query executor is misconfigured.");
+    private static readonly MethodInfo ExecuteUpdateTaskMethod =
+        typeof(JsonColdStoreQueryExecutor)
+            .GetMethod(nameof(ExecuteUpdateTask), BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("The JSONColdStore query executor is misconfigured.");
 
     internal static TResult Execute<TResult>(
         JsonColdStoreOptions options,
@@ -41,6 +50,33 @@ internal static class JsonColdStoreQueryExecutor
         var currentOptions = queryContext.Context.GetService<IDbContextOptions>()
             .FindExtension<JsonColdStoreOptionsExtension>()?.Options
             ?? options;
+
+        if (plan.UpdateAssignments.Count > 0)
+        {
+            if (async)
+            {
+                var asyncResult = CreateExecuteUpdateAsyncResult<TResult>(
+                    currentOptions,
+                    queryContext,
+                    plan);
+                return (TResult)asyncResult;
+            }
+
+            if (typeof(TResult) != typeof(int))
+                throw Unsupported("The ExecuteUpdate result shape is not supported.");
+
+            try
+            {
+                var updated = ExecuteUpdateTypedMethod
+                    .MakeGenericMethod(plan.EntityType)
+                    .Invoke(null, [currentOptions, queryContext, plan]);
+                return (TResult)updated!;
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException is not null)
+            {
+                throw ex.InnerException;
+            }
+        }
 
         if (async)
         {
@@ -89,6 +125,24 @@ internal static class JsonColdStoreQueryExecutor
         }
 
         throw Unsupported("The async LINQ query result shape is not supported.");
+    }
+
+    private static object CreateExecuteUpdateAsyncResult<TResult>(
+        JsonColdStoreOptions options,
+        QueryContext queryContext,
+        JsonColdStoreQueryPlan plan)
+    {
+        var resultType = typeof(TResult);
+        if (resultType.IsGenericType
+            && resultType.GetGenericTypeDefinition() == typeof(Task<>)
+            && resultType.GetGenericArguments()[0] == typeof(int))
+        {
+            return ExecuteUpdateTaskMethod
+                .MakeGenericMethod(plan.EntityType)
+                .Invoke(null, [options, queryContext, plan])!;
+        }
+
+        throw Unsupported("The async ExecuteUpdate result shape is not supported.");
     }
 
     private static object? ExecuteTyped<TEntity, TResult>(
@@ -151,6 +205,30 @@ internal static class JsonColdStoreQueryExecutor
         return (TTerminal)terminal!;
     }
 
+    private static int ExecuteUpdateTyped<TEntity>(
+        JsonColdStoreOptions options,
+        QueryContext queryContext,
+        JsonColdStoreQueryPlan plan)
+        where TEntity : class =>
+        ExecuteUpdateAsync<TEntity>(
+                options,
+                queryContext,
+                plan,
+                queryContext.CancellationToken)
+            .GetAwaiter()
+            .GetResult();
+
+    private static Task<int> ExecuteUpdateTask<TEntity>(
+        JsonColdStoreOptions options,
+        QueryContext queryContext,
+        JsonColdStoreQueryPlan plan)
+        where TEntity : class =>
+        ExecuteUpdateAsync<TEntity>(
+            options,
+            queryContext,
+            plan,
+            queryContext.CancellationToken);
+
     private static async Task<List<TEntity>> ExecuteSequenceAsync<TEntity>(
         JsonColdStoreOptions options,
         QueryContext queryContext,
@@ -184,6 +262,80 @@ internal static class JsonColdStoreQueryExecutor
         ApplyOrdering(filtered, queryContext, plan);
         ApplyPaging(filtered, queryContext, plan);
         return filtered;
+    }
+
+    private static async Task<int> ExecuteUpdateAsync<TEntity>(
+        JsonColdStoreOptions options,
+        QueryContext queryContext,
+        JsonColdStoreQueryPlan plan,
+        CancellationToken cancellationToken)
+        where TEntity : class
+    {
+        if (plan.UpdateAssignments.Count == 0)
+            throw Unsupported("ExecuteUpdate requires at least one SetProperty assignment.");
+
+        await using var session = await JsonColdStoreDatabaseSession.OpenAsync(
+                options,
+                acquireWriterLock: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var modelDescriptor = JsonColdStoreModelDescriptor.Create(queryContext.Context.Model);
+        var entityStore = new JsonColdStoreEntityRecordStore(session, modelDescriptor);
+        var entityDescriptor = modelDescriptor.FindEntity(typeof(TEntity));
+        var candidates = await ReadCandidatesAsync<TEntity>(
+                options,
+                queryContext,
+                entityStore,
+                entityDescriptor,
+                plan,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var predicates = plan.Filters
+            .Select(filter => CreatePredicate<TEntity>(queryContext, filter))
+            .ToArray();
+        var matched = candidates
+            .Where(entity => predicates.All(predicate => predicate(entity)))
+            .ToList();
+
+        if (matched.Count == 0)
+            return 0;
+
+        var assignmentAppliers = plan.UpdateAssignments
+            .Select(assignment => CreateUpdateAssignment<TEntity>(
+                queryContext,
+                entityDescriptor,
+                assignment))
+            .ToArray();
+        foreach (var entity in matched)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var apply in assignmentAppliers)
+                apply(entity);
+        }
+
+        var updatedRecordIds = matched
+            .Select(entityDescriptor.CreateRecordIdFromEntity)
+            .ToHashSet(StringComparer.Ordinal);
+        await ValidateExecuteUpdateUniqueIndexesAsync(
+                entityStore,
+                entityDescriptor,
+                matched,
+                updatedRecordIds,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        foreach (var entity in matched)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await entityStore.WriteEntityAsync(
+                    entity,
+                    entityDescriptor,
+                    updatedRecordIds,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return matched.Count;
     }
 
     private static object? CreateSequenceResult<TEntity, TResult>(
@@ -370,6 +522,115 @@ internal static class JsonColdStoreQueryExecutor
         return lambda.Compile();
     }
 
+    private static Action<TEntity> CreateUpdateAssignment<TEntity>(
+        QueryContext queryContext,
+        JsonColdStoreEntityDescriptor descriptor,
+        JsonColdStoreUpdateAssignment assignment)
+        where TEntity : class
+    {
+        var property = descriptor.Properties.FirstOrDefault(property =>
+                string.Equals(property.Name, assignment.PropertyName, StringComparison.Ordinal))
+            ?? throw Unsupported(
+                $"ExecuteUpdate property '{assignment.PropertyName}' is not mapped by JSONColdStore.");
+        if (descriptor.Key.PropertyNames.Contains(property.Name, StringComparer.Ordinal))
+        {
+            throw Unsupported(
+                $"ExecuteUpdate cannot modify primary key property '{property.Name}'.");
+        }
+
+        Func<TEntity, object?> valueFactory = assignment.ValueSelector is not null
+            ? CompileLambda<TEntity, object?>(queryContext, assignment.ValueSelector)
+            : _ => Evaluate(
+                queryContext,
+                assignment.ValueExpression
+                    ?? throw Unsupported("ExecuteUpdate SetProperty requires a value expression."));
+
+        return entity =>
+        {
+            var value = ConvertAssignmentValue(valueFactory(entity), property.ClrType);
+            property.SetValue(entity, value);
+        };
+    }
+
+    private static object? ConvertAssignmentValue(object? value, Type targetType)
+    {
+        if (value is null)
+            return null;
+
+        var effectiveType = Nullable.GetUnderlyingType(targetType) ?? targetType;
+        if (effectiveType.IsInstanceOfType(value))
+            return value;
+
+        if (effectiveType.IsEnum)
+        {
+            if (value is string text)
+                return Enum.Parse(effectiveType, text, ignoreCase: true);
+
+            return Enum.ToObject(effectiveType, value);
+        }
+
+        if (effectiveType == typeof(Guid))
+            return value is Guid guid ? guid : Guid.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!);
+        if (effectiveType == typeof(DateTimeOffset))
+        {
+            return value is DateTimeOffset dateTimeOffset
+                ? dateTimeOffset
+                : DateTimeOffset.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture);
+        }
+        if (effectiveType == typeof(DateTime))
+        {
+            return value is DateTime dateTime
+                ? dateTime
+                : DateTime.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture);
+        }
+
+        return Convert.ChangeType(value, effectiveType, CultureInfo.InvariantCulture);
+    }
+
+    private static async Task ValidateExecuteUpdateUniqueIndexesAsync<TEntity>(
+        JsonColdStoreEntityRecordStore entityStore,
+        JsonColdStoreEntityDescriptor descriptor,
+        IReadOnlyList<TEntity> entities,
+        IReadOnlySet<string> updatedRecordIds,
+        CancellationToken cancellationToken)
+        where TEntity : class
+    {
+        var pendingUniqueKeys = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var entity in entities)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var recordId = descriptor.CreateRecordIdFromEntity(entity);
+            foreach (var index in descriptor.Indexes.Where(index => index.IsUnique))
+            {
+                var pendingKey = string.Join(
+                    '\u001F',
+                    descriptor.EntityName,
+                    index.StorageName,
+                    index.CreateIndexKeyFromEntity(entity));
+                if (pendingUniqueKeys.TryGetValue(pendingKey, out var existingRecordId)
+                    && !string.Equals(existingRecordId, recordId, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"The JSONColdStore unique index '{index.StorageName}' for entity "
+                        + $"'{descriptor.EntityName}' contains a duplicate value inside the current ExecuteUpdate batch.");
+                }
+
+                pendingUniqueKeys[pendingKey] = recordId;
+            }
+        }
+
+        foreach (var entity in entities)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await entityStore.ValidateUniqueIndexesAsync(
+                    entity,
+                    descriptor,
+                    updatedRecordIds,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
     private static async Task<List<TEntity>> ReadCandidatesAsync<TEntity>(
         JsonColdStoreOptions options,
         QueryContext queryContext,
@@ -402,6 +663,20 @@ internal static class JsonColdStoreQueryExecutor
                     maxResults)
                 .ConfigureAwait(false);
             return indexed.ToList();
+        }
+
+        var contains = plan.Filters
+            .Select(filter => TryCreateContains(queryContext, filter))
+            .FirstOrDefault(candidate => candidate is not null && CanUseContains(entityDescriptor, candidate));
+        if (contains is not null)
+        {
+            var containsResults = await ReadContainsCandidatesAsync<TEntity>(
+                    entityStore,
+                    entityDescriptor,
+                    contains,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return containsResults;
         }
 
         var range = TryCreateRangeCandidate(queryContext, entityDescriptor, plan);
@@ -553,6 +828,61 @@ internal static class JsonColdStoreQueryExecutor
         return CompileLambda<TEntity, bool>(queryContext, filter);
     }
 
+    private static async Task<List<TEntity>> ReadContainsCandidatesAsync<TEntity>(
+        JsonColdStoreEntityRecordStore entityStore,
+        JsonColdStoreEntityDescriptor entityDescriptor,
+        JsonColdStoreQueryContains contains,
+        CancellationToken cancellationToken)
+        where TEntity : class
+    {
+        var results = new List<TEntity>();
+        if (contains.Values.Count == 0)
+            return results;
+
+        var seenRecordIds = new HashSet<string>(StringComparer.Ordinal);
+        if (IsSinglePropertyKeyContains(entityDescriptor, contains))
+        {
+            foreach (var value in contains.Values)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (value is null)
+                    continue;
+
+                var entity = await entityStore.ReadEntityAsync<TEntity>(
+                        value,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (entity is null)
+                    continue;
+
+                var recordId = entityDescriptor.CreateRecordIdFromEntity(entity);
+                if (seenRecordIds.Add(recordId))
+                    results.Add(entity);
+            }
+
+            return results;
+        }
+
+        foreach (var value in contains.Values)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var indexed = await entityStore.ReadEntitiesByIndexAsync<TEntity>(
+                    contains.PropertyName,
+                    value!,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            foreach (var entity in indexed)
+            {
+                var recordId = entityDescriptor.CreateRecordIdFromEntity(entity);
+                if (seenRecordIds.Add(recordId))
+                    results.Add(entity);
+            }
+        }
+
+        return results;
+    }
+
     private static bool ValuesEqual(object? left, object? right)
     {
         if (Equals(left, right))
@@ -582,6 +912,21 @@ internal static class JsonColdStoreQueryExecutor
             && string.Equals(index.PropertyNames[0], seek.PropertyName, StringComparison.Ordinal));
     }
 
+    private static bool CanUseContains(
+        JsonColdStoreEntityDescriptor descriptor,
+        JsonColdStoreQueryContains? contains)
+    {
+        if (contains is null)
+            return false;
+
+        if (IsSinglePropertyKeyContains(descriptor, contains))
+            return true;
+
+        return descriptor.Indexes.Any(index =>
+            index.PropertyNames.Length == 1
+            && string.Equals(index.PropertyNames[0], contains.PropertyName, StringComparison.Ordinal));
+    }
+
     private static bool CanUseIndexedRange(
         JsonColdStoreEntityDescriptor descriptor,
         JsonColdStoreQueryRange? range)
@@ -599,6 +944,12 @@ internal static class JsonColdStoreQueryExecutor
         JsonColdStoreQuerySeek seek) =>
         descriptor.Key.PropertyNames.Count == 1
         && string.Equals(descriptor.Key.PropertyNames[0], seek.PropertyName, StringComparison.Ordinal);
+
+    private static bool IsSinglePropertyKeyContains(
+        JsonColdStoreEntityDescriptor descriptor,
+        JsonColdStoreQueryContains contains) =>
+        descriptor.Key.PropertyNames.Count == 1
+        && string.Equals(descriptor.Key.PropertyNames[0], contains.PropertyName, StringComparison.Ordinal);
 
     private static JsonColdStoreQuerySeek? TryCreateSeek(
         QueryContext queryContext,
@@ -626,6 +977,58 @@ internal static class JsonColdStoreQueryExecutor
         }
 
         return new JsonColdStoreQuerySeek(property.Name, Evaluate(queryContext, valueExpression));
+    }
+
+    private static JsonColdStoreQueryContains? TryCreateContains(
+        QueryContext queryContext,
+        LambdaExpression filter)
+    {
+        var body = UnwrapConvert(filter.Body);
+        if (body is not MethodCallExpression call
+            || !string.Equals(call.Method.Name, nameof(Enumerable.Contains), StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        Expression collectionExpression;
+        Expression valueExpression;
+        if (call.Object is not null && call.Arguments.Count == 1)
+        {
+            collectionExpression = call.Object;
+            valueExpression = call.Arguments[0];
+        }
+        else if (call.Object is null && call.Arguments.Count == 2)
+        {
+            collectionExpression = call.Arguments[0];
+            valueExpression = call.Arguments[1];
+        }
+        else
+        {
+            return null;
+        }
+
+        var propertyName = TryGetPropertyName(filter.Parameters[0], valueExpression);
+        if (propertyName is null)
+            return null;
+
+        var values = EnumerateContainsValues(
+                Evaluate(queryContext, collectionExpression))
+            .Distinct()
+            .ToArray();
+        return new JsonColdStoreQueryContains(propertyName, values);
+    }
+
+    private static IEnumerable<object?> EnumerateContainsValues(object? value)
+    {
+        if (value is null)
+            throw Unsupported("Contains filters require a non-null value collection.");
+        if (value is string)
+            throw Unsupported("String Contains filters are not supported.");
+        if (value is not IEnumerable values)
+            throw Unsupported("Contains filters require an enumerable value collection.");
+
+        foreach (var item in values)
+            yield return item;
     }
 
     private static JsonColdStoreQueryRange? TryCreateRange(
@@ -686,6 +1089,21 @@ internal static class JsonColdStoreQueryExecutor
             _ => operatorType,
         };
 
+    private static string? TryGetPropertyName(
+        ParameterExpression parameter,
+        Expression expression)
+    {
+        var unwrapped = UnwrapConvert(expression);
+        return unwrapped is MemberExpression
+            {
+                Expression: ParameterExpression memberParameter,
+                Member: PropertyInfo property,
+            }
+            && memberParameter == parameter
+                ? property.Name
+                : null;
+    }
+
     private static object? Evaluate(QueryContext queryContext, Expression expression)
     {
         var unwrapped = UnwrapConvert(expression);
@@ -731,6 +1149,7 @@ internal sealed record JsonColdStoreQueryPlan(
     Expression? Skip,
     Expression? Take,
     LambdaExpression? Projection,
+    IReadOnlyList<JsonColdStoreUpdateAssignment> UpdateAssignments,
     JsonColdStoreQueryTerminal Terminal,
     bool ExplicitScan)
 {
@@ -749,6 +1168,7 @@ internal sealed record JsonColdStoreQueryPlan(
             builder.Skip,
             builder.Take,
             builder.Projection,
+            builder.UpdateAssignments,
             builder.Terminal,
             builder.ExplicitScan);
     }
@@ -865,6 +1285,25 @@ internal sealed record JsonColdStoreQueryPlan(
                 return builder;
             }
 
+            case "ExecuteUpdate":
+            case "ExecuteUpdateAsync":
+            {
+                var builder = Parse(call.Arguments[0]);
+                if (builder.Projection is not null)
+                    throw Unsupported("ExecuteUpdate after projection is not supported.");
+                if (builder.Orderings.Count > 0)
+                    throw Unsupported("ExecuteUpdate after ordering is not supported.");
+                if (builder.Skip is not null || builder.Take is not null)
+                    throw Unsupported("ExecuteUpdate after paging is not supported.");
+                if (builder.Filters.Count == 0)
+                    throw Unsupported("ExecuteUpdate without a filter is not supported.");
+                if (call.Arguments.Count < 2)
+                    throw Unsupported("ExecuteUpdate requires SetProperty assignments.");
+
+                builder.UpdateAssignments.AddRange(ParseUpdateAssignments(call.Arguments[1]));
+                return builder;
+            }
+
             default:
                 throw Unsupported(
                     $"The LINQ query method '{methodName}' is not supported by JSONColdStore yet.");
@@ -874,6 +1313,107 @@ internal sealed record JsonColdStoreQueryPlan(
     private static bool IsExplicitScanCall(MethodCallExpression call) =>
         call.Method.IsGenericMethod
         && call.Method.GetGenericMethodDefinition() == ExplicitScanMethod;
+
+    private static IReadOnlyList<JsonColdStoreUpdateAssignment> ParseUpdateAssignments(Expression expression)
+    {
+        if (expression is NewArrayExpression array)
+        {
+            var arrayAssignments = array.Expressions
+                .Select(ParseUpdateAssignmentTuple)
+                .ToArray();
+            if (arrayAssignments.Length == 0)
+                throw Unsupported("ExecuteUpdate requires at least one SetProperty assignment.");
+
+            return arrayAssignments;
+        }
+
+        var lambda = UnquoteLambda(expression);
+        if (lambda.Parameters.Count != 1)
+            throw Unsupported("ExecuteUpdate SetProperty calls must use one setter parameter.");
+
+        var assignments = new List<JsonColdStoreUpdateAssignment>();
+        ParseSetPropertyCalls(lambda.Body, lambda.Parameters[0], assignments);
+        if (assignments.Count == 0)
+            throw Unsupported("ExecuteUpdate requires at least one SetProperty assignment.");
+
+        return assignments;
+    }
+
+    private static JsonColdStoreUpdateAssignment ParseUpdateAssignmentTuple(Expression expression)
+    {
+        if (expression is not NewExpression { Arguments.Count: >= 2 } create)
+            throw Unsupported("ExecuteUpdate SetProperty assignment shape is not supported.");
+
+        var propertyLambda = UnquoteLambda(create.Arguments[0]);
+        if (propertyLambda.Parameters.Count != 1)
+            throw Unsupported("ExecuteUpdate property selectors must use one entity parameter.");
+
+        var propertyName = TryGetPropertyName(
+                propertyLambda.Parameters[0],
+                propertyLambda.Body)
+            ?? throw Unsupported("ExecuteUpdate only supports direct property selectors.");
+
+        var valueExpression = create.Arguments[1];
+        var valueSelector = valueExpression as LambdaExpression;
+        return new JsonColdStoreUpdateAssignment(
+            propertyName,
+            valueSelector,
+            valueSelector is null ? valueExpression : null);
+    }
+
+    private static void ParseSetPropertyCalls(
+        Expression expression,
+        ParameterExpression settersParameter,
+        List<JsonColdStoreUpdateAssignment> assignments)
+    {
+        if (expression is not MethodCallExpression call
+            || !string.Equals(call.Method.Name, "SetProperty", StringComparison.Ordinal))
+        {
+            throw Unsupported("ExecuteUpdate only supports SetProperty assignment calls.");
+        }
+
+        var target = call.Object;
+        var argumentOffset = 0;
+        if (target is null)
+        {
+            if (call.Arguments.Count < 3)
+                throw Unsupported("ExecuteUpdate SetProperty call shape is not supported.");
+
+            target = call.Arguments[0];
+            argumentOffset = 1;
+        }
+
+        if (target == settersParameter)
+        {
+            // First assignment in the chain.
+        }
+        else
+        {
+            ParseSetPropertyCalls(target, settersParameter, assignments);
+        }
+
+        if (call.Arguments.Count <= argumentOffset + 1)
+            throw Unsupported("ExecuteUpdate SetProperty call shape is not supported.");
+
+        var propertyLambda = UnquoteLambda(call.Arguments[argumentOffset]);
+        if (propertyLambda.Parameters.Count != 1)
+            throw Unsupported("ExecuteUpdate property selectors must use one entity parameter.");
+
+        var propertyName = TryGetPropertyName(
+                propertyLambda.Parameters[0],
+                propertyLambda.Body)
+            ?? throw Unsupported("ExecuteUpdate only supports direct property selectors.");
+
+        var valueExpression = call.Arguments[argumentOffset + 1];
+        var unquotedValue = valueExpression is UnaryExpression { NodeType: ExpressionType.Quote } quoted
+            ? quoted.Operand
+            : valueExpression;
+        var valueSelector = unquotedValue as LambdaExpression;
+        assignments.Add(new JsonColdStoreUpdateAssignment(
+            propertyName,
+            valueSelector,
+            valueSelector is null ? valueExpression : null));
+    }
 
     private static void AddFilters(JsonColdStoreQueryPlanBuilder builder, Expression expression)
     {
@@ -905,6 +1445,29 @@ internal sealed record JsonColdStoreQueryPlan(
             ?? throw Unsupported("The LINQ query predicate is not supported.");
     }
 
+    private static string? TryGetPropertyName(
+        ParameterExpression parameter,
+        Expression expression)
+    {
+        var unwrapped = UnwrapConvert(expression);
+        return unwrapped is MemberExpression
+            {
+                Expression: ParameterExpression memberParameter,
+                Member: PropertyInfo property,
+            }
+            && memberParameter == parameter
+                ? property.Name
+                : null;
+    }
+
+    private static Expression UnwrapConvert(Expression expression)
+    {
+        while (expression.NodeType is ExpressionType.Convert or ExpressionType.ConvertChecked)
+            expression = ((UnaryExpression)expression).Operand;
+
+        return expression;
+    }
+
     private static NotSupportedException Unsupported(string message) =>
         new("JSONColdStore EF provider support is incomplete: " + message);
 }
@@ -923,6 +1486,8 @@ internal sealed class JsonColdStoreQueryPlanBuilder(Type entityType)
 
     internal LambdaExpression? Projection { get; set; }
 
+    internal List<JsonColdStoreUpdateAssignment> UpdateAssignments { get; } = [];
+
     internal JsonColdStoreQueryTerminal Terminal { get; set; } = JsonColdStoreQueryTerminal.Sequence;
 
     internal bool ExplicitScan { get; set; }
@@ -940,6 +1505,15 @@ internal sealed record JsonColdStoreQueryRange(
 internal sealed record JsonColdStoreQueryRangeCandidate(
     string PropertyName,
     IReadOnlyList<JsonColdStoreRangeConstraint> Constraints);
+
+internal sealed record JsonColdStoreQueryContains(
+    string PropertyName,
+    IReadOnlyList<object?> Values);
+
+internal sealed record JsonColdStoreUpdateAssignment(
+    string PropertyName,
+    LambdaExpression? ValueSelector,
+    Expression? ValueExpression);
 
 internal enum JsonColdStoreQueryTerminal
 {

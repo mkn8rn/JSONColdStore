@@ -180,6 +180,31 @@ internal sealed record JsonColdStorePropertyDescriptor(
         throw new InvalidOperationException(
             $"The JSONColdStore property '{Name}' is not available on the shared-type entity instance.");
     }
+
+    internal void SetValue(object entity, object? value)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        if (PropertyInfo is not null)
+        {
+            PropertyInfo.SetValue(entity, value);
+            return;
+        }
+
+        if (entity is IDictionary<string, object?> dictionary)
+        {
+            dictionary[Name] = value;
+            return;
+        }
+
+        if (entity is IDictionary<string, object> objectDictionary)
+        {
+            objectDictionary[Name] = value!;
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"The JSONColdStore property '{Name}' cannot be assigned on the shared-type entity instance.");
+    }
 }
 
 internal sealed record JsonColdStoreKeyDescriptor(IReadOnlyList<JsonColdStorePropertyDescriptor> Properties)

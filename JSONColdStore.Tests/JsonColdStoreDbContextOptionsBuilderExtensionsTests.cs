@@ -1472,6 +1472,78 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task LinqThenIncludeCollectionAndSiblingCollectionPopulateSkipNavigations()
+    {
+        var directory = TestDirectory("query-then-include-collections-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<ThenIncludeDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var channelId = Guid.Parse("67000000-0000-0000-0000-000000000001");
+        var contextId = Guid.Parse("67000000-0000-0000-0000-000000000002");
+        var channelAgentId = Guid.Parse("67000000-0000-0000-0000-000000000003");
+        var contextAgentId = Guid.Parse("67000000-0000-0000-0000-000000000004");
+        var ignoredAgentId = Guid.Parse("67000000-0000-0000-0000-000000000005");
+
+        using (var setupContext = new ThenIncludeDbContext(builder.Options))
+        {
+            var channelAgent = new ThenIncludeAgent
+            {
+                Id = channelAgentId,
+                Name = "channel-agent",
+            };
+            var contextAgent = new ThenIncludeAgent
+            {
+                Id = contextAgentId,
+                Name = "context-agent",
+            };
+            var ignoredAgent = new ThenIncludeAgent
+            {
+                Id = ignoredAgentId,
+                Name = "ignored-agent",
+            };
+            var agentContext = new ThenIncludeAgentContext
+            {
+                Id = contextId,
+                Name = "primary-context",
+            };
+            var channel = new ThenIncludeChannel
+            {
+                Id = channelId,
+                Title = "primary-channel",
+                AgentContextId = contextId,
+                AgentContext = agentContext,
+            };
+
+            agentContext.AllowedAgents.Add(contextAgent);
+            channel.AllowedAgents.Add(channelAgent);
+            setupContext.Agents.AddRange(channelAgent, contextAgent, ignoredAgent);
+            setupContext.AgentContexts.Add(agentContext);
+            setupContext.Channels.Add(channel);
+            await setupContext.SaveChangesAsync();
+        }
+
+        using var context = new ThenIncludeDbContext(builder.Options);
+        var read = await context.Channels
+            .Include(value => value.AgentContext)
+            .ThenInclude(value => value!.AllowedAgents)
+            .Include(value => value.AllowedAgents)
+            .FirstOrDefaultAsync(value => value.Id == channelId);
+
+        Assert.NotNull(read);
+        Assert.Equal("primary-channel", read.Title);
+        Assert.NotNull(read.AgentContext);
+        Assert.Equal("primary-context", read.AgentContext.Name);
+        Assert.Equal(
+            ["channel-agent"],
+            read.AllowedAgents.Select(value => value.Name).Order(StringComparer.Ordinal).ToArray());
+        Assert.Equal(
+            ["context-agent"],
+            read.AgentContext.AllowedAgents.Select(value => value.Name).Order(StringComparer.Ordinal).ToArray());
+        Assert.DoesNotContain(read.AllowedAgents, value => value.Id == ignoredAgentId);
+        Assert.DoesNotContain(read.AgentContext.AllowedAgents, value => value.Id == ignoredAgentId);
+        Assert.Equal(0, await context.SaveChangesAsync());
+    }
+
+    [Fact]
     public async Task SaveChangesPersistsAddedEntityThroughStorageSession()
     {
         var directory = TestDirectory("savechanges-" + Guid.NewGuid().ToString("N"));
@@ -5344,6 +5416,102 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         public Guid Id { get; set; }
 
         public List<ManyToManyPost> Posts { get; } = [];
+    }
+
+    private sealed class ThenIncludeDbContext(DbContextOptions<ThenIncludeDbContext> options) : DbContext(options)
+    {
+        public DbSet<ThenIncludeChannel> Channels => Set<ThenIncludeChannel>();
+
+        public DbSet<ThenIncludeAgentContext> AgentContexts => Set<ThenIncludeAgentContext>();
+
+        public DbSet<ThenIncludeAgent> Agents => Set<ThenIncludeAgent>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<ThenIncludeAgent>(entity => entity.HasKey(value => value.Id));
+            modelBuilder.Entity<ThenIncludeAgentContext>(entity =>
+            {
+                entity.HasKey(value => value.Id);
+                entity.HasMany(value => value.AllowedAgents)
+                    .WithMany(value => value.AllowedContexts)
+                    .UsingEntity<Dictionary<string, object>>(
+                        "ThenIncludeContextAllowedAgents",
+                        right => right
+                            .HasOne<ThenIncludeAgent>()
+                            .WithMany()
+                            .HasForeignKey("AgentId"),
+                        left => left
+                            .HasOne<ThenIncludeAgentContext>()
+                            .WithMany()
+                            .HasForeignKey("ContextId"),
+                        join =>
+                        {
+                            join.IndexerProperty<Guid>("ContextId");
+                            join.IndexerProperty<Guid>("AgentId");
+                            join.HasKey("ContextId", "AgentId");
+                        });
+            });
+            modelBuilder.Entity<ThenIncludeChannel>(entity =>
+            {
+                entity.HasKey(value => value.Id);
+                entity.HasOne(value => value.AgentContext)
+                    .WithMany(value => value.Channels)
+                    .HasForeignKey(value => value.AgentContextId);
+                entity.HasMany(value => value.AllowedAgents)
+                    .WithMany(value => value.AllowedChannels)
+                    .UsingEntity<Dictionary<string, object>>(
+                        "ThenIncludeChannelAllowedAgents",
+                        right => right
+                            .HasOne<ThenIncludeAgent>()
+                            .WithMany()
+                            .HasForeignKey("AgentId"),
+                        left => left
+                            .HasOne<ThenIncludeChannel>()
+                            .WithMany()
+                            .HasForeignKey("ChannelId"),
+                        join =>
+                        {
+                            join.IndexerProperty<Guid>("ChannelId");
+                            join.IndexerProperty<Guid>("AgentId");
+                            join.HasKey("ChannelId", "AgentId");
+                        });
+            });
+        }
+    }
+
+    private sealed class ThenIncludeChannel
+    {
+        public Guid Id { get; set; }
+
+        public string Title { get; set; } = string.Empty;
+
+        public Guid? AgentContextId { get; set; }
+
+        public ThenIncludeAgentContext? AgentContext { get; set; }
+
+        public List<ThenIncludeAgent> AllowedAgents { get; } = [];
+    }
+
+    private sealed class ThenIncludeAgentContext
+    {
+        public Guid Id { get; set; }
+
+        public string Name { get; set; } = string.Empty;
+
+        public List<ThenIncludeAgent> AllowedAgents { get; } = [];
+
+        public List<ThenIncludeChannel> Channels { get; } = [];
+    }
+
+    private sealed class ThenIncludeAgent
+    {
+        public Guid Id { get; set; }
+
+        public string Name { get; set; } = string.Empty;
+
+        public List<ThenIncludeChannel> AllowedChannels { get; } = [];
+
+        public List<ThenIncludeAgentContext> AllowedContexts { get; } = [];
     }
 
     private sealed class WritableEntity

@@ -346,13 +346,23 @@ internal sealed class JsonColdStoreEntityRecordStore
         where TEntity : class
     {
         var descriptor = _modelDescriptor.FindEntity(typeof(TEntity));
+        await foreach (var entity in ScanEntitiesAsync(descriptor, cancellationToken))
+            yield return (TEntity)entity;
+    }
+
+    internal async IAsyncEnumerable<object> ScanEntitiesAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+
         await EnsureModelCatalogAsync(createIfMissing: false, cancellationToken);
         var seenRecordIds = new HashSet<string>(StringComparer.Ordinal);
         await foreach (var payload in _session.Records.ReadAllRecordsAsync(
             descriptor.EntityName,
             cancellationToken))
         {
-            var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityReadJsonOptions);
+            var entity = DeserializeEntity(payload, descriptor);
             if (entity is not null)
             {
                 seenRecordIds.Add(descriptor.CreateRecordIdFromEntity(entity));
@@ -367,9 +377,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             if (seenRecordIds.Contains(legacyRecord.RecordId))
                 continue;
 
-            var entity = JsonSerializer.Deserialize<TEntity>(
-                legacyRecord.Payload,
-                EntityReadJsonOptions);
+            var entity = DeserializeEntity(legacyRecord.Payload, descriptor);
             if (entity is not null)
                 yield return entity;
         }
@@ -1295,6 +1303,111 @@ internal sealed class JsonColdStoreEntityRecordStore
             index.CreateIndexKeyFromEntity(entity),
             indexKey,
             StringComparison.Ordinal);
+
+    private static object? DeserializeEntity(
+        byte[] payload,
+        JsonColdStoreEntityDescriptor descriptor)
+    {
+        if (!descriptor.IsSharedType)
+            return JsonSerializer.Deserialize(payload, descriptor.ClrType, EntityReadJsonOptions);
+
+        using var document = JsonDocument.Parse(payload);
+        if (document.RootElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException(
+                $"The shared JSONColdStore record for '{descriptor.EntityName}' must be a JSON object.");
+        }
+
+        var entity = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var property in descriptor.Properties)
+        {
+            if (!TryGetJsonProperty(document.RootElement, property.Name, out var value))
+            {
+                throw new InvalidDataException(
+                    $"The shared JSONColdStore record for '{descriptor.EntityName}' is missing '{property.Name}'.");
+            }
+
+            entity[property.Name] = ConvertJsonValue(
+                value,
+                property.ClrType,
+                descriptor.EntityName,
+                property.Name);
+        }
+
+        return entity;
+    }
+
+    private static bool TryGetJsonProperty(
+        JsonElement element,
+        string propertyName,
+        out JsonElement value)
+    {
+        if (element.TryGetProperty(propertyName, out value))
+            return true;
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static object? ConvertJsonValue(
+        JsonElement value,
+        Type propertyType,
+        string entityName,
+        string propertyName)
+    {
+        var targetType = Nullable.GetUnderlyingType(propertyType) ?? propertyType;
+        if (value.ValueKind == JsonValueKind.Null)
+        {
+            if (Nullable.GetUnderlyingType(propertyType) is not null || !propertyType.IsValueType)
+                return null;
+
+            throw new InvalidDataException(
+                $"The shared JSONColdStore record for '{entityName}' has null for non-null '{propertyName}'.");
+        }
+
+        try
+        {
+            if (targetType == typeof(string))
+                return value.GetString();
+            if (targetType == typeof(Guid))
+            {
+                return value.ValueKind == JsonValueKind.String
+                    ? value.GetGuid()
+                    : JsonSerializer.Deserialize<Guid>(value.GetRawText(), EntityReadJsonOptions);
+            }
+            if (targetType == typeof(DateTime))
+            {
+                return value.ValueKind == JsonValueKind.String
+                    ? value.GetDateTime()
+                    : JsonSerializer.Deserialize<DateTime>(value.GetRawText(), EntityReadJsonOptions);
+            }
+            if (targetType == typeof(DateTimeOffset))
+            {
+                return value.ValueKind == JsonValueKind.String
+                    ? value.GetDateTimeOffset()
+                    : JsonSerializer.Deserialize<DateTimeOffset>(value.GetRawText(), EntityReadJsonOptions);
+            }
+            if (targetType.IsEnum)
+                return JsonSerializer.Deserialize(value.GetRawText(), targetType, EntityReadJsonOptions);
+
+            return JsonSerializer.Deserialize(value.GetRawText(), targetType, EntityReadJsonOptions);
+        }
+        catch (Exception ex) when (ex is ArgumentException or FormatException or InvalidOperationException or JsonException)
+        {
+            throw new InvalidDataException(
+                $"The shared JSONColdStore record for '{entityName}' has invalid '{propertyName}'.",
+                ex);
+        }
+    }
 
     private sealed class NullableGuidConverter : JsonConverter<Guid>
     {

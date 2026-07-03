@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Globalization;
 using System.Linq.Expressions;
 using System.Text.Json;
@@ -232,7 +233,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             return null;
         }
 
-        return JsonSerializer.Deserialize(payload, descriptor.ClrType, EntityReadJsonOptions);
+        return DeserializeEntity(payload, descriptor);
     }
 
     internal async Task<IReadOnlyList<TEntity>> ReadEntitiesByIndexAsync<TEntity>(
@@ -269,7 +270,7 @@ internal sealed class JsonColdStoreEntityRecordStore
                 descriptor.EntityName,
                 recordId,
                 cancellationToken);
-            var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityReadJsonOptions);
+            var entity = (TEntity?)DeserializeEntity(payload, descriptor);
             if (entity is not null)
             {
                 seenRecordIds.Add(recordId);
@@ -418,7 +419,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             descriptor.EntityName,
             cancellationToken))
         {
-            var entity = JsonSerializer.Deserialize(payload, descriptor.ClrType, EntityReadJsonOptions);
+            var entity = DeserializeEntity(payload, descriptor);
             if (entity is null)
                 continue;
 
@@ -435,10 +436,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             if (!seenRecordIds.Add(legacyRecord.RecordId))
                 continue;
 
-            var entity = JsonSerializer.Deserialize(
-                legacyRecord.Payload,
-                descriptor.ClrType,
-                EntityReadJsonOptions);
+            var entity = DeserializeEntity(legacyRecord.Payload, descriptor);
             if (entity is null)
                 continue;
 
@@ -509,10 +507,7 @@ internal sealed class JsonColdStoreEntityRecordStore
                 continue;
             }
 
-            var entity = JsonSerializer.Deserialize(
-                legacyRecord.Payload,
-                descriptor.ClrType,
-                EntityReadJsonOptions);
+            var entity = DeserializeEntity(legacyRecord.Payload, descriptor);
             if (entity is null)
                 throw new InvalidDataException(
                     $"The legacy JSONColdStore record for '{descriptor.EntityName}' deserialized to null.");
@@ -620,7 +615,7 @@ internal sealed class JsonColdStoreEntityRecordStore
                 descriptor.EntityName,
                 cancellationToken))
             {
-                var entity = VerifyPayload(record.Payload, descriptor.ClrType, descriptor.EntityName);
+                var entity = VerifyPayload(record.Payload, descriptor);
                 var verifiedRecord = new JsonColdStoreVerifiedEntityRecord(record.RecordId, entity);
                 currentRecords.Add(verifiedRecord);
                 indexRecords.Add(verifiedRecord);
@@ -632,7 +627,7 @@ internal sealed class JsonColdStoreEntityRecordStore
                 descriptor,
                 cancellationToken))
             {
-                var entity = VerifyPayload(legacyRecord.Payload, descriptor.ClrType, descriptor.EntityName);
+                var entity = VerifyPayload(legacyRecord.Payload, descriptor);
                 if (!currentRecordIds.Contains(legacyRecord.RecordId))
                     indexRecords.Add(new JsonColdStoreVerifiedEntityRecord(legacyRecord.RecordId, entity));
 
@@ -793,7 +788,7 @@ internal sealed class JsonColdStoreEntityRecordStore
                 descriptor.EntityName,
                 recordId,
                 cancellationToken);
-            var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityReadJsonOptions);
+            var entity = (TEntity?)DeserializeEntity(payload, descriptor);
             if (entity is not null)
             {
                 seenRecordIds.Add(recordId);
@@ -808,9 +803,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             if (!seenRecordIds.Add(legacyRecord.RecordId))
                 continue;
 
-            var entity = JsonSerializer.Deserialize<TEntity>(
-                legacyRecord.Payload,
-                EntityReadJsonOptions);
+            var entity = (TEntity?)DeserializeEntity(legacyRecord.Payload, descriptor);
             if (entity is not null)
                 results.Add(entity);
         }
@@ -915,13 +908,12 @@ internal sealed class JsonColdStoreEntityRecordStore
 
     private static object VerifyPayload(
         byte[] payload,
-        Type entityType,
-        string entityName)
+        JsonColdStoreEntityDescriptor descriptor)
     {
-        var entity = JsonSerializer.Deserialize(payload, entityType, EntityReadJsonOptions);
+        var entity = DeserializeEntity(payload, descriptor);
         if (entity is null)
             throw new InvalidDataException(
-                $"The JSONColdStore record for '{entityName}' deserialized to null.");
+                $"The JSONColdStore record for '{descriptor.EntityName}' deserialized to null.");
 
         return entity;
     }
@@ -1181,10 +1173,7 @@ internal sealed class JsonColdStoreEntityRecordStore
                 continue;
             }
 
-            var legacyEntity = JsonSerializer.Deserialize(
-                legacyRecord.Payload,
-                descriptor.ClrType,
-                EntityReadJsonOptions);
+            var legacyEntity = DeserializeEntity(legacyRecord.Payload, descriptor);
             if (legacyEntity is not null
                 && string.Equals(
                     index.CreateIndexKeyFromEntity(legacyEntity),
@@ -1258,7 +1247,7 @@ internal sealed class JsonColdStoreEntityRecordStore
                     descriptor,
                     recordId,
                     cancellationToken);
-                var entity = JsonSerializer.Deserialize<TEntity>(payload, EntityReadJsonOptions);
+                var entity = (TEntity?)DeserializeEntity(payload, descriptor);
                 if (entity is not null && EntityMatchesIndexKey(index, entity, indexKey))
                 {
                     results.Add(entity);
@@ -1277,9 +1266,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             if (!seenRecordIds.Add(legacyRecord.RecordId))
                 continue;
 
-            var entity = JsonSerializer.Deserialize<TEntity>(
-                legacyRecord.Payload,
-                EntityReadJsonOptions);
+            var entity = (TEntity?)DeserializeEntity(legacyRecord.Payload, descriptor);
             if (entity is not null && string.Equals(
                     index.CreateIndexKeyFromEntity(entity),
                     indexKey,
@@ -1309,7 +1296,7 @@ internal sealed class JsonColdStoreEntityRecordStore
         JsonColdStoreEntityDescriptor descriptor)
     {
         if (!descriptor.IsSharedType)
-            return JsonSerializer.Deserialize(payload, descriptor.ClrType, EntityReadJsonOptions);
+            return DeserializeMappedEntity(payload, descriptor);
 
         using var document = JsonDocument.Parse(payload);
         if (document.RootElement.ValueKind != JsonValueKind.Object)
@@ -1335,6 +1322,33 @@ internal sealed class JsonColdStoreEntityRecordStore
         }
 
         return entity;
+    }
+
+    private static object? DeserializeMappedEntity(
+        byte[] payload,
+        JsonColdStoreEntityDescriptor descriptor)
+    {
+        using var document = JsonDocument.Parse(payload);
+        if (document.RootElement.ValueKind != JsonValueKind.Object)
+            return JsonSerializer.Deserialize(payload, descriptor.ClrType, EntityReadJsonOptions);
+
+        var filtered = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(filtered))
+        {
+            writer.WriteStartObject();
+            foreach (var property in descriptor.Properties)
+            {
+                if (!TryGetJsonProperty(document.RootElement, property.Name, out var value))
+                    continue;
+
+                writer.WritePropertyName(property.Name);
+                value.WriteTo(writer);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        return JsonSerializer.Deserialize(filtered.WrittenSpan, descriptor.ClrType, EntityReadJsonOptions);
     }
 
     private static bool TryGetJsonProperty(

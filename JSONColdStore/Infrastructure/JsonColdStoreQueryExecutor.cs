@@ -266,9 +266,10 @@ internal static class JsonColdStoreQueryExecutor
         var loadIncludes = ShouldLoadIncludes(entityDescriptor, plan);
         if (loadIncludes && trackEntityResults)
             filtered = ResolveTrackedEntityReferences(queryContext, entityDescriptor, filtered);
+        var includedEntities = new List<JsonColdStoreMaterializedEntity>();
         if (loadIncludes)
         {
-            await LoadIncludesAsync(
+            includedEntities = await LoadIncludesAsync(
                     entityStore,
                     modelDescriptor,
                     entityDescriptor,
@@ -280,7 +281,12 @@ internal static class JsonColdStoreQueryExecutor
                 .ConfigureAwait(false);
         }
         if (trackEntityResults)
+        {
+            foreach (var includedEntity in includedEntities)
+                _ = TrackEntityResult(queryContext, includedEntity.Descriptor, includedEntity.Entity);
+
             filtered = TrackEntityResults(queryContext, entityDescriptor, filtered);
+        }
 
         return filtered;
     }
@@ -468,7 +474,7 @@ internal static class JsonColdStoreQueryExecutor
             or JsonColdStoreQueryTerminal.Any);
     }
 
-    private static async Task LoadIncludesAsync<TEntity>(
+    private static async Task<List<JsonColdStoreMaterializedEntity>> LoadIncludesAsync<TEntity>(
         JsonColdStoreEntityRecordStore entityStore,
         JsonColdStoreModelDescriptor modelDescriptor,
         JsonColdStoreEntityDescriptor entityDescriptor,
@@ -479,8 +485,9 @@ internal static class JsonColdStoreQueryExecutor
         CancellationToken cancellationToken)
         where TEntity : class
     {
+        var includedEntities = new List<JsonColdStoreMaterializedEntity>();
         if (results.Count == 0)
-            return;
+            return includedEntities;
 
         foreach (var include in plan.Includes)
         {
@@ -492,10 +499,13 @@ internal static class JsonColdStoreQueryExecutor
                     results.Cast<object>().ToArray(),
                     include.NavigationPath,
                     depth: 0,
+                    includedEntities,
                     resolveTrackedEntities,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
+
+        return includedEntities;
     }
 
     private static async Task<IReadOnlyList<object>> LoadIncludePathAsync(
@@ -506,6 +516,7 @@ internal static class JsonColdStoreQueryExecutor
         IReadOnlyList<object> sourceEntities,
         IReadOnlyList<string> navigationPath,
         int depth,
+        List<JsonColdStoreMaterializedEntity> includedEntities,
         bool resolveTrackedEntities,
         CancellationToken cancellationToken)
     {
@@ -526,6 +537,7 @@ internal static class JsonColdStoreQueryExecutor
                     resolveTrackedEntities,
                     cancellationToken)
                 .ConfigureAwait(false);
+            AddMaterializedEntities(includedEntities, targetDescriptor, related);
 
             return depth + 1 >= navigationPath.Count
                 ? related
@@ -537,6 +549,7 @@ internal static class JsonColdStoreQueryExecutor
                         related,
                         navigationPath,
                         depth + 1,
+                        includedEntities,
                         resolveTrackedEntities,
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -557,6 +570,7 @@ internal static class JsonColdStoreQueryExecutor
                     resolveTrackedEntities,
                     cancellationToken)
                 .ConfigureAwait(false);
+            AddMaterializedEntities(includedEntities, targetDescriptor, related);
 
             return depth + 1 >= navigationPath.Count
                 ? related
@@ -568,6 +582,7 @@ internal static class JsonColdStoreQueryExecutor
                         related,
                         navigationPath,
                         depth + 1,
+                        includedEntities,
                         resolveTrackedEntities,
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -707,6 +722,15 @@ internal static class JsonColdStoreQueryExecutor
         return allRelatedEntities;
     }
 
+    private static void AddMaterializedEntities(
+        List<JsonColdStoreMaterializedEntity> materializedEntities,
+        JsonColdStoreEntityDescriptor descriptor,
+        IEnumerable<object> entities)
+    {
+        foreach (var entity in entities)
+            materializedEntities.Add(new JsonColdStoreMaterializedEntity(descriptor, entity));
+    }
+
     private static List<TEntity> TrackEntityResults<TEntity>(
         QueryContext queryContext,
         JsonColdStoreEntityDescriptor entityDescriptor,
@@ -752,7 +776,7 @@ internal static class JsonColdStoreQueryExecutor
         if (existing is not null)
             return existing;
 
-        queryContext.Context.Attach(entity);
+        queryContext.Context.Entry(entity).State = EntityState.Unchanged;
         return entity;
     }
 
@@ -1989,6 +2013,10 @@ internal sealed record JsonColdStoreQueryInclude(IReadOnlyList<string> Navigatio
     internal JsonColdStoreQueryInclude Append(string navigationName) =>
         new([.. NavigationPath, navigationName]);
 }
+
+internal sealed record JsonColdStoreMaterializedEntity(
+    JsonColdStoreEntityDescriptor Descriptor,
+    object Entity);
 
 internal sealed record JsonColdStoreQuerySeek(string PropertyName, object? Value);
 

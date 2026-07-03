@@ -1544,6 +1544,104 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task LinqThenIncludeIgnoresLegacyNavigationPayloadsBeforeTracking()
+    {
+        var directory = TestDirectory("query-then-include-legacy-navigation-payloads-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<ThenIncludeDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var channelId = Guid.Parse("67000000-0000-0000-0000-000000000011");
+        var contextId = Guid.Parse("67000000-0000-0000-0000-000000000012");
+        var channelAgentId = Guid.Parse("67000000-0000-0000-0000-000000000013");
+        var contextAgentId = Guid.Parse("67000000-0000-0000-0000-000000000014");
+
+        await WriteLegacyEntityJsonAsync(
+            directory,
+            nameof(ThenIncludeAgent),
+            channelAgentId,
+            new
+            {
+                id = channelAgentId,
+                name = "channel-agent",
+                allowedChannels = new object?[] { null },
+                allowedContexts = new object?[] { null },
+            });
+        await WriteLegacyEntityJsonAsync(
+            directory,
+            nameof(ThenIncludeAgent),
+            contextAgentId,
+            new
+            {
+                id = contextAgentId,
+                name = "context-agent",
+                allowedChannels = new object?[] { null },
+                allowedContexts = new object?[] { null },
+            });
+        await WriteLegacyEntityJsonAsync(
+            directory,
+            nameof(ThenIncludeAgentContext),
+            contextId,
+            new
+            {
+                id = contextId,
+                name = "primary-context",
+                allowedAgents = new object?[] { null },
+                channels = new object?[] { null },
+            });
+        await WriteLegacyEntityJsonAsync(
+            directory,
+            nameof(ThenIncludeChannel),
+            channelId,
+            new
+            {
+                id = channelId,
+                title = "primary-channel",
+                agentContextId = contextId,
+                allowedAgents = new object?[] { null },
+                messages = new object?[] { null },
+            });
+        await WriteLegacySharedRowsAsync(
+            directory,
+            "ThenIncludeContextAllowedAgents",
+            [
+                new Dictionary<string, Guid>
+                {
+                    ["ContextId"] = contextId,
+                    ["AgentId"] = contextAgentId,
+                },
+            ]);
+        await WriteLegacySharedRowsAsync(
+            directory,
+            "ThenIncludeChannelAllowedAgents",
+            [
+                new Dictionary<string, Guid>
+                {
+                    ["ChannelId"] = channelId,
+                    ["AgentId"] = channelAgentId,
+                },
+            ]);
+
+        using var context = new ThenIncludeDbContext(builder.Options);
+        var read = await context.Channels
+            .Include(value => value.AgentContext)
+            .ThenInclude(value => value!.AllowedAgents)
+            .Include(value => value.AllowedAgents)
+            .FirstOrDefaultAsync(value => value.Id == channelId);
+
+        Assert.NotNull(read);
+        Assert.Equal("primary-channel", read.Title);
+        Assert.Empty(read.Messages);
+        Assert.NotNull(read.AgentContext);
+        Assert.Equal([channelId], read.AgentContext.Channels.Select(value => value.Id).ToArray());
+        Assert.Equal(
+            ["channel-agent"],
+            read.AllowedAgents.Select(value => value.Name).Order(StringComparer.Ordinal).ToArray());
+        Assert.Equal(
+            ["context-agent"],
+            read.AgentContext.AllowedAgents.Select(value => value.Name).Order(StringComparer.Ordinal).ToArray());
+        Assert.Equal(0, await context.SaveChangesAsync());
+    }
+
+    [Fact]
     public async Task SaveChangesPersistsAddedEntityThroughStorageSession()
     {
         var directory = TestDirectory("savechanges-" + Guid.NewGuid().ToString("N"));
@@ -5081,6 +5179,20 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         await File.WriteAllBytesAsync(Path.Combine(entityDirectory, fileName), bytes);
     }
 
+    private static async Task WriteLegacyEntityJsonAsync(
+        string directory,
+        string legacyEntityDirectoryName,
+        Guid id,
+        object entity)
+    {
+        var entityDirectory = Path.Combine(directory, legacyEntityDirectoryName);
+        Directory.CreateDirectory(entityDirectory);
+        var json = JsonSerializer.Serialize(
+            entity,
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        await File.WriteAllTextAsync(Path.Combine(entityDirectory, $"{id}.json"), json);
+    }
+
     private static async Task<string> WriteLegacySharedRowsAsync(
         string directory,
         string sharedEntityName,
@@ -5426,8 +5538,11 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
 
         public DbSet<ThenIncludeAgent> Agents => Set<ThenIncludeAgent>();
 
+        public DbSet<ThenIncludeMessage> Messages => Set<ThenIncludeMessage>();
+
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
+            modelBuilder.Entity<ThenIncludeMessage>(entity => entity.HasKey(value => value.Id));
             modelBuilder.Entity<ThenIncludeAgent>(entity => entity.HasKey(value => value.Id));
             modelBuilder.Entity<ThenIncludeAgentContext>(entity =>
             {
@@ -5457,6 +5572,9 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
                 entity.HasOne(value => value.AgentContext)
                     .WithMany(value => value.Channels)
                     .HasForeignKey(value => value.AgentContextId);
+                entity.HasMany(value => value.Messages)
+                    .WithOne(value => value.Channel)
+                    .HasForeignKey(value => value.ChannelId);
                 entity.HasMany(value => value.AllowedAgents)
                     .WithMany(value => value.AllowedChannels)
                     .UsingEntity<Dictionary<string, object>>(
@@ -5490,6 +5608,8 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         public ThenIncludeAgentContext? AgentContext { get; set; }
 
         public List<ThenIncludeAgent> AllowedAgents { get; } = [];
+
+        public List<ThenIncludeMessage> Messages { get; } = [];
     }
 
     private sealed class ThenIncludeAgentContext
@@ -5512,6 +5632,17 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         public List<ThenIncludeChannel> AllowedChannels { get; } = [];
 
         public List<ThenIncludeAgentContext> AllowedContexts { get; } = [];
+    }
+
+    private sealed class ThenIncludeMessage
+    {
+        public Guid Id { get; set; }
+
+        public Guid ChannelId { get; set; }
+
+        public ThenIncludeChannel? Channel { get; set; }
+
+        public string Text { get; set; } = string.Empty;
     }
 
     private sealed class WritableEntity

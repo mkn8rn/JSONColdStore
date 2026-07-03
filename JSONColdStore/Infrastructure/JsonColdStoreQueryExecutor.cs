@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using JSONColdStore.Storage;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Query;
 
@@ -261,6 +262,9 @@ internal static class JsonColdStoreQueryExecutor
 
         ApplyOrdering(filtered, queryContext, plan);
         ApplyPaging(filtered, queryContext, plan);
+        if (ShouldTrackEntityResults(queryContext, entityDescriptor, plan))
+            filtered = TrackEntityResults(queryContext, entityDescriptor, filtered);
+
         return filtered;
     }
 
@@ -412,6 +416,81 @@ internal static class JsonColdStoreQueryExecutor
             JsonColdStoreQueryTerminal.SingleOrDefault => results.SingleOrDefault(),
             _ => throw Unsupported("The LINQ query terminal is not supported."),
         };
+    }
+
+    private static bool ShouldTrackEntityResults(
+        QueryContext queryContext,
+        JsonColdStoreEntityDescriptor entityDescriptor,
+        JsonColdStoreQueryPlan plan)
+    {
+        if (entityDescriptor.IsSharedType || plan.Projection is not null)
+            return false;
+
+        if (plan.Terminal is JsonColdStoreQueryTerminal.Count
+            or JsonColdStoreQueryTerminal.LongCount
+            or JsonColdStoreQueryTerminal.Any)
+        {
+            return false;
+        }
+
+        var trackingBehavior = plan.TrackingBehavior
+            ?? queryContext.Context.ChangeTracker.QueryTrackingBehavior;
+        return trackingBehavior == QueryTrackingBehavior.TrackAll;
+    }
+
+    private static List<TEntity> TrackEntityResults<TEntity>(
+        QueryContext queryContext,
+        JsonColdStoreEntityDescriptor entityDescriptor,
+        List<TEntity> results)
+        where TEntity : class
+    {
+        if (results.Count == 0)
+            return results;
+
+        var tracked = new List<TEntity>(results.Count);
+        foreach (var entity in results)
+        {
+            var existing = FindTrackedEntity(queryContext, entityDescriptor, entity);
+            if (existing is not null)
+            {
+                tracked.Add(existing);
+                continue;
+            }
+
+            queryContext.Context.Attach(entity);
+            tracked.Add(entity);
+        }
+
+        return tracked;
+    }
+
+    private static TEntity? FindTrackedEntity<TEntity>(
+        QueryContext queryContext,
+        JsonColdStoreEntityDescriptor entityDescriptor,
+        TEntity entity)
+        where TEntity : class
+    {
+        foreach (var entry in queryContext.Context.ChangeTracker.Entries<TEntity>())
+        {
+            if (EntityKeysEqual(entityDescriptor, entry.Entity, entity))
+                return entry.Entity;
+        }
+
+        return null;
+    }
+
+    private static bool EntityKeysEqual(
+        JsonColdStoreEntityDescriptor entityDescriptor,
+        object left,
+        object right)
+    {
+        foreach (var keyProperty in entityDescriptor.Key.Properties)
+        {
+            if (!Equals(keyProperty.GetValue(left), keyProperty.GetValue(right)))
+                return false;
+        }
+
+        return true;
     }
 
     private static Type? TryGetSequenceElementType(Type resultType)
@@ -1151,6 +1230,7 @@ internal sealed record JsonColdStoreQueryPlan(
     LambdaExpression? Projection,
     IReadOnlyList<JsonColdStoreUpdateAssignment> UpdateAssignments,
     JsonColdStoreQueryTerminal Terminal,
+    QueryTrackingBehavior? TrackingBehavior,
     bool ExplicitScan)
 {
     private static readonly MethodInfo ExplicitScanMethod =
@@ -1170,6 +1250,7 @@ internal sealed record JsonColdStoreQueryPlan(
             builder.Projection,
             builder.UpdateAssignments,
             builder.Terminal,
+            builder.TrackingBehavior,
             builder.ExplicitScan);
     }
 
@@ -1191,6 +1272,23 @@ internal sealed record JsonColdStoreQueryPlan(
         var methodName = call.Method.Name;
         switch (methodName)
         {
+            case nameof(EntityFrameworkQueryableExtensions.AsNoTracking):
+            case nameof(EntityFrameworkQueryableExtensions.AsNoTrackingWithIdentityResolution):
+            {
+                var builder = Parse(call.Arguments[0]);
+                builder.TrackingBehavior = QueryTrackingBehavior.NoTracking;
+                return builder;
+            }
+
+            case nameof(EntityFrameworkQueryableExtensions.AsTracking):
+            {
+                var builder = Parse(call.Arguments[0]);
+                builder.TrackingBehavior = call.Arguments.Count == 2
+                    ? ParseTrackingBehavior(call.Arguments[1])
+                    : QueryTrackingBehavior.TrackAll;
+                return builder;
+            }
+
             case nameof(Queryable.Where):
             {
                 var builder = Parse(call.Arguments[0]);
@@ -1313,6 +1411,15 @@ internal sealed record JsonColdStoreQueryPlan(
     private static bool IsExplicitScanCall(MethodCallExpression call) =>
         call.Method.IsGenericMethod
         && call.Method.GetGenericMethodDefinition() == ExplicitScanMethod;
+
+    private static QueryTrackingBehavior ParseTrackingBehavior(Expression expression)
+    {
+        var unwrapped = UnwrapConvert(expression);
+        if (unwrapped is ConstantExpression { Value: QueryTrackingBehavior behavior })
+            return behavior;
+
+        return QueryTrackingBehavior.TrackAll;
+    }
 
     private static IReadOnlyList<JsonColdStoreUpdateAssignment> ParseUpdateAssignments(Expression expression)
     {
@@ -1489,6 +1596,8 @@ internal sealed class JsonColdStoreQueryPlanBuilder(Type entityType)
     internal List<JsonColdStoreUpdateAssignment> UpdateAssignments { get; } = [];
 
     internal JsonColdStoreQueryTerminal Terminal { get; set; } = JsonColdStoreQueryTerminal.Sequence;
+
+    internal QueryTrackingBehavior? TrackingBehavior { get; set; }
 
     internal bool ExplicitScan { get; set; }
 }

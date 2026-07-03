@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using System.Text.Json;
 using JSONColdStore.Storage;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -10,13 +11,23 @@ namespace JSONColdStore.Infrastructure;
 
 internal sealed class JsonColdStoreDatabase : IDatabase
 {
-    private readonly JsonColdStoreOptions _options;
+    private static readonly JsonSerializerOptions EntityWriteJsonOptions = new()
+    {
+        WriteIndented = false,
+    };
 
-    public JsonColdStoreDatabase(IDbContextOptions contextOptions)
+    private readonly JsonColdStoreOptions _options;
+    private readonly JsonColdStoreTransactionManager _transactionManager;
+
+    public JsonColdStoreDatabase(
+        IDbContextOptions contextOptions,
+        IDbContextTransactionManager transactionManager)
     {
         ArgumentNullException.ThrowIfNull(contextOptions);
         _options = contextOptions.FindExtension<JsonColdStoreOptionsExtension>()?.Options
             ?? throw new InvalidOperationException("JSONColdStore options are not configured.");
+        _transactionManager = transactionManager as JsonColdStoreTransactionManager
+            ?? throw new InvalidOperationException("JSONColdStore transaction services are not configured.");
     }
 
     public int SaveChanges(IList<IUpdateEntry> entries)
@@ -69,11 +80,18 @@ internal sealed class JsonColdStoreDatabase : IDatabase
         if (entries.Count == 0)
             return 0;
 
+        var modelDescriptor = JsonColdStoreModelDescriptor.Create(entries[0].Context.Model);
+        if (_transactionManager.CurrentJsonColdStoreTransaction is not null)
+        {
+            var batch = CreateTransactionalSaveBatch(entries, modelDescriptor);
+            _transactionManager.EnqueueSaveBatch(batch);
+            return batch.Operations.Count;
+        }
+
         await using var session = await JsonColdStoreDatabaseSession.OpenAsync(
             _options,
             acquireWriterLock: true,
             cancellationToken);
-        var modelDescriptor = JsonColdStoreModelDescriptor.Create(entries[0].Context.Model);
         var entityStore = new JsonColdStoreEntityRecordStore(session, modelDescriptor);
         var pendingChanges = CreatePendingChanges(entries, modelDescriptor);
         await ValidatePendingUniqueIndexesAsync(
@@ -119,6 +137,47 @@ internal sealed class JsonColdStoreDatabase : IDatabase
         }
 
         return saved;
+    }
+
+    private static JsonColdStoreTransactionalSaveBatch CreateTransactionalSaveBatch(
+        IEnumerable<IUpdateEntry> entries,
+        JsonColdStoreModelDescriptor modelDescriptor)
+    {
+        var operations = new List<JsonColdStoreTransactionalOperation>();
+
+        foreach (var entry in entries)
+        {
+            if (entry.EntityState is not (EntityState.Added or EntityState.Modified or EntityState.Deleted))
+                continue;
+
+            var entity = entry.ToEntityEntry().Entity;
+            var descriptor = modelDescriptor.FindEntity(entry.EntityType);
+            var recordId = descriptor.CreateRecordIdFromEntity(entity);
+
+            if (entry.EntityState == EntityState.Deleted)
+            {
+                operations.Add(new JsonColdStoreTransactionalDelete(descriptor, recordId));
+                continue;
+            }
+
+            var payload = JsonSerializer.SerializeToUtf8Bytes(
+                descriptor.CreateRecordPayload(entity),
+                EntityWriteJsonOptions);
+            var indexValues = descriptor.Indexes
+                .Select(index => new JsonColdStoreTransactionalIndexValue(
+                    index,
+                    index.CreateIndexKeyFromEntity(entity),
+                    index.Properties.Select(property => property.GetValue(entity)).ToArray()))
+                .ToArray();
+
+            operations.Add(new JsonColdStoreTransactionalWrite(
+                descriptor,
+                recordId,
+                payload,
+                indexValues));
+        }
+
+        return new JsonColdStoreTransactionalSaveBatch(modelDescriptor, operations);
     }
 
     private static JsonColdStorePendingChanges CreatePendingChanges(

@@ -109,6 +109,35 @@ internal sealed class JsonColdStoreEntityRecordStore
         _session.LegacyRecords.DeleteRecordIfExists(descriptor, recordId);
     }
 
+    internal async Task WriteEntityAsync(
+        JsonColdStoreTransactionalWrite write,
+        IReadOnlySet<string>? ignoredRecordIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+
+        await EnsureModelCatalogAsync(createIfMissing: true, cancellationToken);
+        await EnsureUniqueIndexesAsync(
+            write.Descriptor,
+            write.RecordId,
+            write.IndexValues,
+            ignoredRecordIds,
+            cancellationToken);
+
+        await _session.Records.WriteRecordAsync(
+            write.Descriptor.EntityName,
+            write.RecordId,
+            write.Payload,
+            cancellationToken);
+
+        await UpsertIndexesAsync(
+            write.Descriptor,
+            write.RecordId,
+            write.IndexValues,
+            cancellationToken);
+        _session.LegacyRecords.DeleteRecordIfExists(write.Descriptor, write.RecordId);
+    }
+
     internal async Task ValidateUniqueIndexesAsync(
         object entity,
         Type entityType,
@@ -141,6 +170,22 @@ internal sealed class JsonColdStoreEntityRecordStore
             descriptor,
             entity,
             recordId,
+            ignoredRecordIds,
+            cancellationToken);
+    }
+
+    internal async Task ValidateUniqueIndexesAsync(
+        JsonColdStoreTransactionalWrite write,
+        IReadOnlySet<string>? ignoredRecordIds = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+
+        await EnsureModelCatalogAsync(createIfMissing: true, cancellationToken);
+        await EnsureUniqueIndexesAsync(
+            write.Descriptor,
+            write.RecordId,
+            write.IndexValues,
             ignoredRecordIds,
             cancellationToken);
     }
@@ -891,6 +936,22 @@ internal sealed class JsonColdStoreEntityRecordStore
         _session.LegacyRecords.DeleteRecordIfExists(descriptor, recordId);
     }
 
+    internal async Task DeleteEntityAsync(
+        JsonColdStoreTransactionalDelete delete,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(delete);
+
+        await EnsureModelCatalogAsync(createIfMissing: true, cancellationToken);
+        await _session.Records.DeleteRecordAsync(
+            delete.Descriptor.EntityName,
+            delete.RecordId,
+            cancellationToken);
+
+        await RemoveIndexesAsync(delete.Descriptor, delete.RecordId, cancellationToken);
+        _session.LegacyRecords.DeleteRecordIfExists(delete.Descriptor, delete.RecordId);
+    }
+
     private async Task EnsureModelCatalogAsync(
         bool createIfMissing,
         CancellationToken cancellationToken)
@@ -928,6 +989,23 @@ internal sealed class JsonColdStoreEntityRecordStore
                 descriptor.EntityName,
                 index.StorageName,
                 index.CreateIndexKeyFromEntity(entity),
+                recordId,
+                cancellationToken);
+        }
+    }
+
+    private async Task UpsertIndexesAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        string recordId,
+        IReadOnlyList<JsonColdStoreTransactionalIndexValue> indexValues,
+        CancellationToken cancellationToken)
+    {
+        foreach (var indexValue in indexValues)
+        {
+            await _indexStore.UpsertAsync(
+                descriptor.EntityName,
+                indexValue.Index.StorageName,
+                indexValue.IndexKey,
                 recordId,
                 cancellationToken);
         }
@@ -974,6 +1052,47 @@ internal sealed class JsonColdStoreEntityRecordStore
         }
     }
 
+    private async Task EnsureUniqueIndexesAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        string recordId,
+        IReadOnlyList<JsonColdStoreTransactionalIndexValue> indexValues,
+        IReadOnlySet<string>? ignoredRecordIds,
+        CancellationToken cancellationToken)
+    {
+        foreach (var indexValue in indexValues.Where(value => value.Index.IsUnique))
+        {
+            var index = indexValue.Index;
+            EnsureCurrentIndexAvailable(descriptor, index);
+            var currentRecordIds = await _indexStore.ReadRecordIdsAsync(
+                descriptor.EntityName,
+                index.StorageName,
+                indexValue.IndexKey,
+                cancellationToken);
+
+            foreach (var currentRecordId in currentRecordIds)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (IsSameRecord(currentRecordId, recordId)
+                    || IsIgnoredRecord(currentRecordId, ignoredRecordIds))
+                {
+                    continue;
+                }
+
+                if (_session.Records.RecordExists(descriptor.EntityName, currentRecordId))
+                    ThrowUniqueIndexConflict(descriptor, index);
+            }
+
+            await EnsureLegacyUniqueIndexAsync(
+                descriptor,
+                index,
+                recordId,
+                indexValue.IndexKey,
+                indexValue.Values.FirstOrDefault() ?? string.Empty,
+                ignoredRecordIds,
+                cancellationToken);
+        }
+    }
+
     private async Task EnsureLegacyUniqueIndexAsync(
         JsonColdStoreEntityDescriptor descriptor,
         JsonColdStoreIndexDescriptor index,
@@ -983,13 +1102,32 @@ internal sealed class JsonColdStoreEntityRecordStore
         IReadOnlySet<string>? ignoredRecordIds,
         CancellationToken cancellationToken)
     {
+        await EnsureLegacyUniqueIndexAsync(
+            descriptor,
+            index,
+            recordId,
+            indexKey,
+            index.Properties[0].GetValue(entity) ?? string.Empty,
+            ignoredRecordIds,
+            cancellationToken);
+    }
+
+    private async Task EnsureLegacyUniqueIndexAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        JsonColdStoreIndexDescriptor index,
+        string recordId,
+        string indexKey,
+        object indexValue,
+        IReadOnlySet<string>? ignoredRecordIds,
+        CancellationToken cancellationToken)
+    {
         if (index.Properties.Length == 1)
         {
             var lookup = await _session.LegacyRecords.LookupIndexAsync(
                 descriptor,
                 index,
                 indexKey,
-                index.Properties[0].GetValue(entity) ?? string.Empty,
+                indexValue,
                 cancellationToken);
 
             if (lookup.UseIndex)

@@ -1,3 +1,4 @@
+using System.Data;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -943,16 +944,427 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
-    public void BeginTransactionThrowsUntilTransactionsAreImplemented()
+    public async Task BeginTransactionAsyncSerializableStagesSaveChangesUntilCommit()
     {
-        var builder = new DbContextOptionsBuilder<TestDbContext>();
-        builder.UseJsonColdStoreDatabase(TestDirectory("transaction-unsupported"));
-        using var context = new TestDbContext(builder.Options);
+        var directory = TestDirectory("transaction-async-commit-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var targetId = Guid.Parse("64000000-0000-0000-0000-000000000001");
+        var untouchedId = Guid.Parse("64000000-0000-0000-0000-000000000002");
 
-        var exception = Assert.Throws<NotSupportedException>(
-            () => context.Database.BeginTransaction());
+        using (var setupContext = new WritableDbContext(builder.Options))
+        {
+            setupContext.Entities.AddRange(
+                new WritableEntity
+                {
+                    Id = targetId,
+                    Value = "before-commit",
+                    Score = 1,
+                },
+                new WritableEntity
+                {
+                    Id = untouchedId,
+                    Value = "untouched",
+                    Score = 2,
+                });
+            await setupContext.SaveChangesAsync();
+        }
 
-        Assert.Contains("Explicit transactions are not implemented yet", exception.Message);
+        await using (var context = new WritableDbContext(builder.Options))
+        {
+            await using var transaction = await context.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable);
+            var entity = await context.Entities.SingleAsync(value => value.Id == targetId);
+            entity.Value = "after-commit";
+            entity.Score = 10;
+
+            Assert.Same(transaction, context.Database.CurrentTransaction);
+            Assert.Equal(1, await context.SaveChangesAsync());
+
+            using (var beforeCommitContext = new WritableDbContext(builder.Options))
+            {
+                var beforeCommit = await beforeCommitContext.Entities.SingleAsync(value => value.Id == targetId);
+                Assert.Equal("before-commit", beforeCommit.Value);
+                Assert.Equal(1, beforeCommit.Score);
+            }
+
+            await transaction.CommitAsync();
+            Assert.Null(context.Database.CurrentTransaction);
+        }
+
+        using var readContext = new WritableDbContext(builder.Options);
+        var changed = await readContext.Entities.SingleAsync(value => value.Id == targetId);
+        var untouched = await readContext.Entities.SingleAsync(value => value.Id == untouchedId);
+        var newIndexMatches = await readContext.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            nameof(WritableEntity.Value),
+            "after-commit");
+        var oldIndexMatches = await readContext.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            nameof(WritableEntity.Value),
+            "before-commit");
+
+        Assert.Equal("after-commit", changed.Value);
+        Assert.Equal(10, changed.Score);
+        Assert.Equal("untouched", untouched.Value);
+        Assert.Equal(2, untouched.Score);
+        Assert.Single(newIndexMatches);
+        Assert.Equal(targetId, newIndexMatches[0].Id);
+        Assert.Empty(oldIndexMatches);
+    }
+
+    [Fact]
+    public async Task BeginTransactionAsyncRollbackDiscardsSavedChanges()
+    {
+        var directory = TestDirectory("transaction-async-rollback-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var entityId = Guid.Parse("64000000-0000-0000-0000-000000000003");
+
+        using (var setupContext = new WritableDbContext(builder.Options))
+        {
+            setupContext.Entities.Add(new WritableEntity
+            {
+                Id = entityId,
+                Value = "before-rollback",
+                Score = 3,
+            });
+            await setupContext.SaveChangesAsync();
+        }
+
+        await using (var context = new WritableDbContext(builder.Options))
+        {
+            await using var transaction = await context.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable);
+            var entity = await context.Entities.SingleAsync(value => value.Id == entityId);
+            entity.Value = "after-rollback";
+            entity.Score = 30;
+
+            Assert.Equal(1, await context.SaveChangesAsync());
+            await transaction.RollbackAsync();
+            Assert.Null(context.Database.CurrentTransaction);
+        }
+
+        using var readContext = new WritableDbContext(builder.Options);
+        var read = await readContext.Entities.SingleAsync(value => value.Id == entityId);
+        var indexMatches = await readContext.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            nameof(WritableEntity.Value),
+            "before-rollback");
+
+        Assert.Equal("before-rollback", read.Value);
+        Assert.Equal(3, read.Score);
+        Assert.Single(indexMatches);
+        Assert.Equal(entityId, indexMatches[0].Id);
+    }
+
+    [Fact]
+    public async Task DisposingTransactionWithoutCommitDiscardsSavedChanges()
+    {
+        var directory = TestDirectory("transaction-dispose-rollback-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var entityId = Guid.Parse("64000000-0000-0000-0000-000000000004");
+
+        using (var setupContext = new WritableDbContext(builder.Options))
+        {
+            setupContext.Entities.Add(new WritableEntity
+            {
+                Id = entityId,
+                Value = "before-dispose",
+                Score = 4,
+            });
+            await setupContext.SaveChangesAsync();
+        }
+
+        await using (var context = new WritableDbContext(builder.Options))
+        {
+            await using (await context.Database.BeginTransactionAsync(IsolationLevel.Serializable))
+            {
+                var entity = await context.Entities.SingleAsync(value => value.Id == entityId);
+                entity.Value = "after-dispose";
+                entity.Score = 40;
+
+                Assert.Equal(1, await context.SaveChangesAsync());
+            }
+
+            Assert.Null(context.Database.CurrentTransaction);
+        }
+
+        using var readContext = new WritableDbContext(builder.Options);
+        var read = await readContext.Entities.SingleAsync(value => value.Id == entityId);
+
+        Assert.Equal("before-dispose", read.Value);
+        Assert.Equal(4, read.Score);
+    }
+
+    [Fact]
+    public async Task BeginTransactionRejectsNestedTransactions()
+    {
+        var directory = TestDirectory("transaction-nested-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        await using var context = new WritableDbContext(builder.Options);
+        await using var transaction = await context.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => context.Database.BeginTransactionAsync(IsolationLevel.Serializable));
+
+        Assert.Contains("active transaction", exception.Message);
+        await transaction.RollbackAsync();
+    }
+
+    [Fact]
+    public async Task TransactionCommitFailureDoesNotWriteEarlierStagedRecords()
+    {
+        var directory = TestDirectory("transaction-commit-failure-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<UniqueWritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var existingId = Guid.Parse("64000000-0000-0000-0000-000000000005");
+        var validId = Guid.Parse("64000000-0000-0000-0000-000000000006");
+        var duplicateId = Guid.Parse("64000000-0000-0000-0000-000000000007");
+
+        using (var setupContext = new UniqueWritableDbContext(builder.Options))
+        {
+            setupContext.Entities.Add(new WritableEntity
+            {
+                Id = existingId,
+                Value = "reserved-transaction-value",
+            });
+            await setupContext.SaveChangesAsync();
+        }
+
+        await using (var context = new UniqueWritableDbContext(builder.Options))
+        {
+            await using var transaction = await context.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable);
+            context.Entities.Update(new WritableEntity
+            {
+                Id = validId,
+                Value = "valid-transaction-value",
+            });
+            context.Entities.Update(new WritableEntity
+            {
+                Id = duplicateId,
+                Value = "reserved-transaction-value",
+            });
+
+            Assert.Equal(2, await context.SaveChangesAsync());
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => transaction.CommitAsync());
+
+            Assert.Contains("unique index", exception.Message);
+            Assert.Null(context.Database.CurrentTransaction);
+        }
+
+        Assert.False(File.Exists(CurrentRecordPath(directory, validId)));
+        Assert.False(File.Exists(CurrentRecordPath(directory, duplicateId)));
+        using var readContext = new UniqueWritableDbContext(builder.Options);
+        var existingMatches = await readContext.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            nameof(WritableEntity.Value),
+            "reserved-transaction-value");
+        var validMatches = await readContext.Database.ReadJsonColdStoreIndexAsync<WritableEntity>(
+            nameof(WritableEntity.Value),
+            "valid-transaction-value");
+
+        Assert.Single(existingMatches);
+        Assert.Equal(existingId, existingMatches[0].Id);
+        Assert.Empty(validMatches);
+    }
+
+    [Fact]
+    public async Task TransactionCommitPersistsTrackedQueryMutationAndIndexReplacement()
+    {
+        var directory = TestDirectory("transaction-claim-style-commit-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<ClaimStyleDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var alphaRecordId = Guid.Parse("65000000-0000-0000-0000-000000000001");
+        var betaRecordId = Guid.Parse("65000000-0000-0000-0000-000000000002");
+        var alphaIndexId = Guid.Parse("65000000-0000-0000-0000-000000000003");
+        var betaIndexId = Guid.Parse("65000000-0000-0000-0000-000000000004");
+        var replacementIndexId = Guid.Parse("65000000-0000-0000-0000-000000000005");
+
+        using (var setupContext = new ClaimStyleDbContext(builder.Options))
+        {
+            setupContext.Records.AddRange(
+                new ClaimStyleRecord
+                {
+                    Id = alphaRecordId,
+                    RecordKey = "alpha",
+                    ValueJson = """{"status":"old"}""",
+                },
+                new ClaimStyleRecord
+                {
+                    Id = betaRecordId,
+                    RecordKey = "beta",
+                    ValueJson = """{"status":"kept"}""",
+                });
+            setupContext.IndexEntries.AddRange(
+                new ClaimStyleIndexEntry
+                {
+                    Id = alphaIndexId,
+                    RecordKey = "alpha",
+                    IndexName = "status",
+                    IndexValue = "old",
+                },
+                new ClaimStyleIndexEntry
+                {
+                    Id = betaIndexId,
+                    RecordKey = "beta",
+                    IndexName = "status",
+                    IndexValue = "kept",
+                });
+            await setupContext.SaveChangesAsync();
+        }
+
+        await using (var context = new ClaimStyleDbContext(builder.Options))
+        {
+            await using var transaction = await context.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable);
+            var keySet = new[] { "alpha" };
+            var records = await context.Records
+                .Where(record => keySet.Contains(record.RecordKey))
+                .ToListAsync();
+            var existingIndexes = await context.IndexEntries
+                .Where(index => keySet.Contains(index.RecordKey))
+                .ToListAsync();
+
+            Assert.Single(records);
+            records[0].ValueJson = """{"status":"patched"}""";
+            context.IndexEntries.RemoveRange(existingIndexes);
+            context.IndexEntries.Add(new ClaimStyleIndexEntry
+            {
+                Id = replacementIndexId,
+                RecordKey = "alpha",
+                IndexName = "status",
+                IndexValue = "patched",
+            });
+
+            Assert.Equal(3, await context.SaveChangesAsync());
+            await transaction.CommitAsync();
+        }
+
+        using var readContext = new ClaimStyleDbContext(builder.Options);
+        var alphaRecord = await readContext.Records.SingleAsync(record => record.RecordKey == "alpha");
+        var betaRecord = await readContext.Records.SingleAsync(record => record.RecordKey == "beta");
+        var alphaIndexes = await readContext.IndexEntries
+            .Where(index => index.RecordKey == "alpha")
+            .ToListAsync();
+        var betaIndexes = await readContext.IndexEntries
+            .Where(index => index.RecordKey == "beta")
+            .ToListAsync();
+
+        Assert.Equal("""{"status":"patched"}""", alphaRecord.ValueJson);
+        Assert.Equal("""{"status":"kept"}""", betaRecord.ValueJson);
+        Assert.Single(alphaIndexes);
+        Assert.Equal(replacementIndexId, alphaIndexes[0].Id);
+        Assert.Equal("patched", alphaIndexes[0].IndexValue);
+        Assert.Single(betaIndexes);
+        Assert.Equal(betaIndexId, betaIndexes[0].Id);
+    }
+
+    [Fact]
+    public async Task TransactionRollbackDiscardsTrackedQueryMutationAndIndexReplacement()
+    {
+        var directory = TestDirectory("transaction-claim-style-rollback-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<ClaimStyleDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var alphaRecordId = Guid.Parse("65000000-0000-0000-0000-000000000006");
+        var alphaIndexId = Guid.Parse("65000000-0000-0000-0000-000000000007");
+        var replacementIndexId = Guid.Parse("65000000-0000-0000-0000-000000000008");
+
+        using (var setupContext = new ClaimStyleDbContext(builder.Options))
+        {
+            setupContext.Records.Add(new ClaimStyleRecord
+            {
+                Id = alphaRecordId,
+                RecordKey = "alpha",
+                ValueJson = """{"status":"old"}""",
+            });
+            setupContext.IndexEntries.Add(new ClaimStyleIndexEntry
+            {
+                Id = alphaIndexId,
+                RecordKey = "alpha",
+                IndexName = "status",
+                IndexValue = "old",
+            });
+            await setupContext.SaveChangesAsync();
+        }
+
+        await using (var context = new ClaimStyleDbContext(builder.Options))
+        {
+            await using var transaction = await context.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable);
+            var keySet = new[] { "alpha" };
+            var records = await context.Records
+                .Where(record => keySet.Contains(record.RecordKey))
+                .ToListAsync();
+            var existingIndexes = await context.IndexEntries
+                .Where(index => keySet.Contains(index.RecordKey))
+                .ToListAsync();
+
+            records[0].ValueJson = """{"status":"rolled-back"}""";
+            context.IndexEntries.RemoveRange(existingIndexes);
+            context.IndexEntries.Add(new ClaimStyleIndexEntry
+            {
+                Id = replacementIndexId,
+                RecordKey = "alpha",
+                IndexName = "status",
+                IndexValue = "rolled-back",
+            });
+
+            Assert.Equal(3, await context.SaveChangesAsync());
+            await transaction.RollbackAsync();
+        }
+
+        using var readContext = new ClaimStyleDbContext(builder.Options);
+        var alphaRecord = await readContext.Records.SingleAsync(record => record.RecordKey == "alpha");
+        var alphaIndexes = await readContext.IndexEntries
+            .Where(index => index.RecordKey == "alpha")
+            .ToListAsync();
+
+        Assert.Equal("""{"status":"old"}""", alphaRecord.ValueJson);
+        Assert.Single(alphaIndexes);
+        Assert.Equal(alphaIndexId, alphaIndexes[0].Id);
+        Assert.Equal("old", alphaIndexes[0].IndexValue);
+        Assert.False(File.Exists(CurrentRecordPath(
+            directory,
+            typeof(ClaimStyleIndexEntry).FullName!,
+            replacementIndexId.ToString())));
+    }
+
+    [Fact]
+    public async Task AsNoTrackingQueryDoesNotTrackReturnedEntities()
+    {
+        var directory = TestDirectory("query-as-no-tracking-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var entityId = Guid.Parse("65000000-0000-0000-0000-000000000009");
+
+        using (var setupContext = new WritableDbContext(builder.Options))
+        {
+            setupContext.Entities.Add(new WritableEntity
+            {
+                Id = entityId,
+                Value = "not-tracked",
+                Score = 9,
+            });
+            await setupContext.SaveChangesAsync();
+        }
+
+        using (var context = new WritableDbContext(builder.Options))
+        {
+            var entity = await context.Entities
+                .AsNoTracking()
+                .SingleAsync(value => value.Id == entityId);
+            entity.Value = "changed-in-memory";
+
+            Assert.Equal(0, await context.SaveChangesAsync());
+        }
+
+        using var readContext = new WritableDbContext(builder.Options);
+        var read = await readContext.Entities.SingleAsync(value => value.Id == entityId);
+
+        Assert.Equal("not-tracked", read.Value);
+        Assert.Equal(9, read.Score);
     }
 
     [Fact]
@@ -4743,6 +5155,27 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         }
     }
 
+    private sealed class ClaimStyleDbContext(DbContextOptions<ClaimStyleDbContext> options) : DbContext(options)
+    {
+        public DbSet<ClaimStyleRecord> Records => Set<ClaimStyleRecord>();
+
+        public DbSet<ClaimStyleIndexEntry> IndexEntries => Set<ClaimStyleIndexEntry>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<ClaimStyleRecord>(entity =>
+            {
+                entity.HasKey(value => value.Id);
+                entity.HasIndex(value => value.RecordKey);
+            });
+            modelBuilder.Entity<ClaimStyleIndexEntry>(entity =>
+            {
+                entity.HasKey(value => value.Id);
+                entity.HasIndex(value => value.RecordKey);
+            });
+        }
+    }
+
     private sealed class ManyToManyDbContext(DbContextOptions<ManyToManyDbContext> options) : DbContext(options)
     {
         public DbSet<ManyToManyPost> Posts => Set<ManyToManyPost>();
@@ -4798,5 +5231,25 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
         public int Score { get; set; }
 
         public DateTimeOffset? AccessTokensInvalidatedAt { get; set; }
+    }
+
+    private sealed class ClaimStyleRecord
+    {
+        public Guid Id { get; set; }
+
+        public string RecordKey { get; set; } = string.Empty;
+
+        public string ValueJson { get; set; } = string.Empty;
+    }
+
+    private sealed class ClaimStyleIndexEntry
+    {
+        public Guid Id { get; set; }
+
+        public string RecordKey { get; set; } = string.Empty;
+
+        public string IndexName { get; set; } = string.Empty;
+
+        public string IndexValue { get; set; } = string.Empty;
     }
 }

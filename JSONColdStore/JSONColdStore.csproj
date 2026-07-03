@@ -4,7 +4,7 @@
     <AssemblyName>JSONColdStore</AssemblyName>
     <RootNamespace>JSONColdStore</RootNamespace>
     <PackageId>JSONColdStore</PackageId>
-    <Version>0.1.0-alpha.3</Version>
+    <Version>0.1.0-alpha.4</Version>
     <Title>JSONColdStore</Title>
     <Authors>mkn8rn</Authors>
     <Description>EF Core provider foundation for durable local JSON cold storage.</Description>
@@ -21,5 +21,6 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" />
   </ItemGroup>
 </Project>

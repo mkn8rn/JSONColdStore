@@ -3,6 +3,7 @@ namespace JSONColdStore.Storage;
 internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposable
 {
     private readonly JsonColdStoreDatabaseLock? _writerLock;
+    private readonly bool _ownsWriterLock;
     private bool _disposed;
 
     private JsonColdStoreDatabaseSession(
@@ -12,7 +13,8 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
         JsonColdStoreStartupValidationResult startupValidationResult,
         JsonColdStoreRecordStore records,
         JsonColdStoreLegacyRecordStore legacyRecords,
-        JsonColdStoreDatabaseLock? writerLock)
+        JsonColdStoreDatabaseLock? writerLock,
+        bool ownsWriterLock)
     {
         Options = options;
         Metadata = metadata;
@@ -21,6 +23,7 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
         Records = records;
         LegacyRecords = legacyRecords;
         _writerLock = writerLock;
+        _ownsWriterLock = ownsWriterLock;
     }
 
     internal JsonColdStoreOptions Options { get; }
@@ -40,12 +43,42 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
         bool acquireWriterLock = true,
         CancellationToken cancellationToken = default)
     {
+        return await OpenCoreAsync(
+            options,
+            acquireWriterLock,
+            existingWriterLock: null,
+            ownsWriterLock: acquireWriterLock,
+            cancellationToken);
+    }
+
+    internal static async Task<JsonColdStoreDatabaseSession> OpenWithExistingWriterLockAsync(
+        JsonColdStoreOptions options,
+        JsonColdStoreDatabaseLock writerLock,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(writerLock);
+
+        return await OpenCoreAsync(
+            options,
+            acquireWriterLock: true,
+            existingWriterLock: writerLock,
+            ownsWriterLock: false,
+            cancellationToken);
+    }
+
+    private static async Task<JsonColdStoreDatabaseSession> OpenCoreAsync(
+        JsonColdStoreOptions options,
+        bool acquireWriterLock,
+        JsonColdStoreDatabaseLock? existingWriterLock,
+        bool ownsWriterLock,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(options);
 
-        JsonColdStoreDatabaseLock? writerLock = null;
+        JsonColdStoreDatabaseLock? writerLock = existingWriterLock;
         try
         {
-            if (acquireWriterLock)
+            if (acquireWriterLock && writerLock is null)
                 writerLock = await JsonColdStoreDatabaseLock.AcquireAsync(options, cancellationToken);
 
             var deletedTemporaryFiles = acquireWriterLock
@@ -79,11 +112,13 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
                 startupValidationResult,
                 records,
                 legacyRecords,
-                writerLock);
+                writerLock,
+                ownsWriterLock);
         }
         catch
         {
-            writerLock?.Dispose();
+            if (ownsWriterLock)
+                writerLock?.Dispose();
             throw;
         }
     }
@@ -94,7 +129,8 @@ internal sealed class JsonColdStoreDatabaseSession : IAsyncDisposable, IDisposab
             return;
 
         _disposed = true;
-        _writerLock?.Dispose();
+        if (_ownsWriterLock)
+            _writerLock?.Dispose();
     }
 
     public ValueTask DisposeAsync()

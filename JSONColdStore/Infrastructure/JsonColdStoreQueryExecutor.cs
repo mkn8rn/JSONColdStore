@@ -253,6 +253,22 @@ internal static class JsonColdStoreQueryExecutor
                 plan,
                 cancellationToken)
             .ConfigureAwait(false);
+        var trackEntityResults = ShouldTrackEntityResults(queryContext, entityDescriptor, plan);
+        var loadIncludes = ShouldLoadIncludes(entityDescriptor, plan);
+        if (loadIncludes && plan.Filters.Any(ContainsAnyOperator))
+        {
+            _ = await LoadIncludesAsync(
+                    entityStore,
+                    modelDescriptor,
+                    entityDescriptor,
+                    queryContext,
+                    plan,
+                    candidates,
+                    resolveTrackedEntities: false,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var predicates = plan.Filters
             .Select(filter => CreatePredicate<TEntity>(queryContext, filter))
             .ToArray();
@@ -262,8 +278,6 @@ internal static class JsonColdStoreQueryExecutor
 
         ApplyOrdering(filtered, queryContext, plan);
         ApplyPaging(filtered, queryContext, plan);
-        var trackEntityResults = ShouldTrackEntityResults(queryContext, entityDescriptor, plan);
-        var loadIncludes = ShouldLoadIncludes(entityDescriptor, plan);
         if (loadIncludes && trackEntityResults)
             filtered = ResolveTrackedEntityReferences(queryContext, entityDescriptor, filtered);
         var includedEntities = new List<JsonColdStoreMaterializedEntity>();
@@ -289,6 +303,26 @@ internal static class JsonColdStoreQueryExecutor
         }
 
         return filtered;
+    }
+
+    private static bool ContainsAnyOperator(LambdaExpression filter)
+    {
+        var visitor = new AnyMethodVisitor();
+        visitor.Visit(filter.Body);
+        return visitor.Found;
+    }
+
+    private sealed class AnyMethodVisitor : ExpressionVisitor
+    {
+        internal bool Found { get; private set; }
+
+        protected override Expression VisitMethodCall(MethodCallExpression node)
+        {
+            if (string.Equals(node.Method.Name, nameof(Enumerable.Any), StringComparison.Ordinal))
+                Found = true;
+
+            return base.VisitMethodCall(node);
+        }
     }
 
     private static async Task<int> ExecuteUpdateAsync<TEntity>(
@@ -485,6 +519,18 @@ internal static class JsonColdStoreQueryExecutor
         CancellationToken cancellationToken)
         where TEntity : class
     {
+        if (plan.SplittingBehavior is QuerySplittingBehavior.SingleQuery)
+        {
+            throw Unsupported(
+                "AsSingleQuery is not supported for Include materialization; JSONColdStore uses split navigation reads.");
+        }
+
+        if (plan.SplittingBehavior is not null
+            and not QuerySplittingBehavior.SplitQuery)
+        {
+            throw Unsupported("The requested query splitting behavior is not supported.");
+        }
+
         var includedEntities = new List<JsonColdStoreMaterializedEntity>();
         if (results.Count == 0)
             return includedEntities;
@@ -555,6 +601,38 @@ internal static class JsonColdStoreQueryExecutor
                     .ConfigureAwait(false);
         }
 
+        var collectionNavigation = sourceDescriptor.FindCollectionNavigation(navigationName);
+        if (collectionNavigation is not null)
+        {
+            var targetDescriptor = modelDescriptor.FindEntity(collectionNavigation.TargetClrType);
+            var related = await LoadCollectionIncludeAsync(
+                    entityStore,
+                    sourceDescriptor,
+                    targetDescriptor,
+                    collectionNavigation,
+                    queryContext,
+                    sourceEntities,
+                    resolveTrackedEntities,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            AddMaterializedEntities(includedEntities, targetDescriptor, related);
+
+            return depth + 1 >= navigationPath.Count
+                ? related
+                : await LoadIncludePathAsync(
+                        entityStore,
+                        modelDescriptor,
+                        targetDescriptor,
+                        queryContext,
+                        related,
+                        navigationPath,
+                        depth + 1,
+                        includedEntities,
+                        resolveTrackedEntities,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+        }
+
         var skipCollectionNavigation = sourceDescriptor.FindSkipCollectionNavigation(navigationName);
         if (skipCollectionNavigation is not null)
         {
@@ -589,7 +667,7 @@ internal static class JsonColdStoreQueryExecutor
         }
 
         throw Unsupported(
-            $"Include navigation '{navigationName}' is not a supported reference or skip-collection navigation.");
+            $"Include navigation '{navigationName}' is not a supported reference, collection, or skip-collection navigation.");
     }
 
     private static async Task<IReadOnlyList<object>> LoadReferenceIncludeAsync(
@@ -641,6 +719,70 @@ internal static class JsonColdStoreQueryExecutor
         }
 
         return relatedEntities;
+    }
+
+    private static async Task<IReadOnlyList<object>> LoadCollectionIncludeAsync(
+        JsonColdStoreEntityRecordStore entityStore,
+        JsonColdStoreEntityDescriptor sourceDescriptor,
+        JsonColdStoreEntityDescriptor targetDescriptor,
+        JsonColdStoreCollectionNavigationDescriptor navigation,
+        QueryContext queryContext,
+        IReadOnlyList<object> sourceEntities,
+        bool resolveTrackedEntities,
+        CancellationToken cancellationToken)
+    {
+        if (!navigation.PrincipalKeyPropertyNames.SequenceEqual(
+                sourceDescriptor.Key.PropertyNames,
+                StringComparer.Ordinal))
+        {
+            throw Unsupported(
+                $"Include navigation '{navigation.Name}' must originate from the source entity primary key.");
+        }
+
+        var relatedBySourceRecordId = new Dictionary<string, List<object>>(StringComparer.Ordinal);
+        await foreach (var targetEntity in entityStore.ScanEntitiesAsync(
+                           targetDescriptor,
+                           cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var sourceKeyValue = navigation.CreateSourceKeyValue(targetDescriptor, targetEntity);
+            if (sourceKeyValue is null)
+                continue;
+
+            var sourceRecordId = sourceDescriptor.CreateRecordId(sourceKeyValue);
+            var related = targetEntity;
+            if (resolveTrackedEntities)
+                related = FindTrackedEntity(queryContext, targetDescriptor, related) ?? related;
+
+            if (!relatedBySourceRecordId.TryGetValue(sourceRecordId, out var sourceRelatedEntities))
+            {
+                sourceRelatedEntities = [];
+                relatedBySourceRecordId.Add(sourceRecordId, sourceRelatedEntities);
+            }
+
+            sourceRelatedEntities.Add(related);
+        }
+
+        var allRelatedEntities = new List<object>();
+        foreach (var sourceEntity in sourceEntities)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var sourceKeyValue = navigation.CreatePrincipalKeyValue(sourceDescriptor, sourceEntity);
+            if (sourceKeyValue is null)
+            {
+                navigation.SetCollection(sourceEntity, []);
+                continue;
+            }
+
+            var sourceRecordId = sourceDescriptor.CreateRecordId(sourceKeyValue);
+            if (!relatedBySourceRecordId.TryGetValue(sourceRecordId, out var sourceRelatedEntities))
+                sourceRelatedEntities = [];
+
+            navigation.SetCollection(sourceEntity, sourceRelatedEntities);
+            allRelatedEntities.AddRange(sourceRelatedEntities);
+        }
+
+        return allRelatedEntities;
     }
 
     private static async Task<IReadOnlyList<object>> LoadSkipCollectionIncludeAsync(
@@ -1550,6 +1692,7 @@ internal sealed record JsonColdStoreQueryPlan(
     IReadOnlyList<JsonColdStoreUpdateAssignment> UpdateAssignments,
     JsonColdStoreQueryTerminal Terminal,
     QueryTrackingBehavior? TrackingBehavior,
+    QuerySplittingBehavior? SplittingBehavior,
     bool ExplicitScan)
 {
     private static readonly MethodInfo ExplicitScanMethod =
@@ -1572,6 +1715,7 @@ internal sealed record JsonColdStoreQueryPlan(
             builder.UpdateAssignments,
             builder.Terminal,
             builder.TrackingBehavior,
+            builder.SplittingBehavior,
             builder.ExplicitScan);
     }
 
@@ -1609,6 +1753,23 @@ internal sealed record JsonColdStoreQueryPlan(
                     : QueryTrackingBehavior.TrackAll;
                 return builder;
             }
+
+            case nameof(RelationalQueryableExtensions.AsSplitQuery):
+            {
+                var builder = Parse(call.Arguments[0]);
+                if (builder.SplittingBehavior == QuerySplittingBehavior.SingleQuery)
+                {
+                    throw Unsupported(
+                        "AsSplitQuery cannot be combined with AsSingleQuery.");
+                }
+
+                builder.SplittingBehavior = QuerySplittingBehavior.SplitQuery;
+                return builder;
+            }
+
+            case nameof(RelationalQueryableExtensions.AsSingleQuery):
+                throw Unsupported(
+                    "AsSingleQuery is not supported for JSONColdStore Include materialization; use AsSplitQuery.");
 
             case nameof(Queryable.Where):
             {
@@ -1999,6 +2160,8 @@ internal sealed class JsonColdStoreQueryPlanBuilder(Type entityType)
     internal JsonColdStoreQueryTerminal Terminal { get; set; } = JsonColdStoreQueryTerminal.Sequence;
 
     internal QueryTrackingBehavior? TrackingBehavior { get; set; }
+
+    internal QuerySplittingBehavior? SplittingBehavior { get; set; }
 
     internal bool ExplicitScan { get; set; }
 }

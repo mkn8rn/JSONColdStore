@@ -1544,6 +1544,215 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task LinqAsSplitQueryPreservesNestedAndSiblingCollectionsForTrackedAndNoTrackingResults()
+    {
+        var directory = TestDirectory("query-as-split-include-collections-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<ThenIncludeDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        var channelId = Guid.Parse("67000000-0000-0000-0000-000000000006");
+        var contextId = Guid.Parse("67000000-0000-0000-0000-000000000007");
+        var channelAgentId = Guid.Parse("67000000-0000-0000-0000-000000000008");
+        var contextAgentId = Guid.Parse("67000000-0000-0000-0000-000000000009");
+
+        using (var setupContext = new ThenIncludeDbContext(builder.Options))
+        {
+            var channelAgent = new ThenIncludeAgent
+            {
+                Id = channelAgentId,
+                Name = "channel-agent",
+            };
+            var contextAgent = new ThenIncludeAgent
+            {
+                Id = contextAgentId,
+                Name = "context-agent",
+            };
+            var agentContext = new ThenIncludeAgentContext
+            {
+                Id = contextId,
+                Name = "primary-context",
+            };
+            var channel = new ThenIncludeChannel
+            {
+                Id = channelId,
+                Title = "primary-channel",
+                AgentContextId = contextId,
+                AgentContext = agentContext,
+            };
+
+            agentContext.AllowedAgents.Add(contextAgent);
+            channel.AllowedAgents.Add(channelAgent);
+            setupContext.Agents.AddRange(channelAgent, contextAgent);
+            setupContext.AgentContexts.Add(agentContext);
+            setupContext.Channels.Add(channel);
+            await setupContext.SaveChangesAsync();
+        }
+
+        using (var trackedContext = new ThenIncludeDbContext(builder.Options))
+        {
+            var read = await trackedContext.Channels
+                .Include(value => value.AgentContext)
+                .ThenInclude(value => value!.AllowedAgents)
+                .Include(value => value.AllowedAgents)
+                .AsSplitQuery()
+                .Where(value => value.Id == channelId)
+                .FirstOrDefaultAsync();
+
+            Assert.NotNull(read);
+            Assert.NotNull(read.AgentContext);
+            Assert.Equal(
+                ["channel-agent"],
+                read.AllowedAgents.Select(value => value.Name).ToArray());
+            Assert.Equal(
+                ["context-agent"],
+                read.AgentContext.AllowedAgents.Select(value => value.Name).ToArray());
+            Assert.Equal(EntityState.Unchanged, trackedContext.Entry(read).State);
+            Assert.Equal(EntityState.Unchanged, trackedContext.Entry(read.AgentContext).State);
+            Assert.Equal(0, await trackedContext.SaveChangesAsync());
+        }
+
+        using var noTrackingContext = new ThenIncludeDbContext(builder.Options);
+        var noTrackingRead = await noTrackingContext.Channels
+            .Include(value => value.AgentContext)
+            .ThenInclude(value => value!.AllowedAgents)
+            .Include(value => value.AllowedAgents)
+            .AsNoTracking()
+            .AsSplitQuery()
+            .Where(value => value.Id == channelId)
+            .FirstOrDefaultAsync();
+
+        Assert.NotNull(noTrackingRead);
+        Assert.NotNull(noTrackingRead.AgentContext);
+        Assert.Equal(
+            ["channel-agent"],
+            noTrackingRead.AllowedAgents.Select(value => value.Name).ToArray());
+        Assert.Equal(
+            ["context-agent"],
+            noTrackingRead.AgentContext.AllowedAgents.Select(value => value.Name).ToArray());
+        Assert.Empty(noTrackingContext.ChangeTracker.Entries());
+    }
+
+    [Fact]
+    public async Task LinqAsSplitQuerySupportsPrincipalCollectionsAndNavigationFilter()
+    {
+        var directory = TestDirectory("query-as-split-principal-collections-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<AsSplitPermissionDbContext>();
+        builder.UseJsonColdStoreDatabase(
+            directory,
+            store => store
+                .UseFsyncOnWrite(false)
+                .UseFullScanPolicy(JsonColdStoreScanPolicy.AllowSilentScans));
+        var wildcardResourceId = Guid.Parse("68000000-0000-0000-0000-000000000001");
+        var matchingId = Guid.Parse("68000000-0000-0000-0000-000000000010");
+        var otherId = Guid.Parse("68000000-0000-0000-0000-000000000020");
+
+        using (var setupContext = new AsSplitPermissionDbContext(builder.Options))
+        {
+            setupContext.PermissionSets.AddRange(
+                new AsSplitPermissionSet
+                {
+                    Id = matchingId,
+                    Code = "matching",
+                    ResourceAccesses =
+                    [
+                        new AsSplitResourceAccess
+                        {
+                            Id = Guid.Parse("68000000-0000-0000-0000-000000000011"),
+                            ResourceId = wildcardResourceId,
+                            ResourceType = "all",
+                        },
+                    ],
+                    GlobalFlags =
+                    [
+                        new AsSplitGlobalFlag
+                        {
+                            Id = Guid.Parse("68000000-0000-0000-0000-000000000012"),
+                            FlagKey = "first",
+                        },
+                    ],
+                },
+                new AsSplitPermissionSet
+                {
+                    Id = otherId,
+                    Code = "other",
+                    ResourceAccesses =
+                    [
+                        new AsSplitResourceAccess
+                        {
+                            Id = Guid.Parse("68000000-0000-0000-0000-000000000021"),
+                            ResourceId = Guid.Parse("68000000-0000-0000-0000-000000000002"),
+                            ResourceType = "specific",
+                        },
+                    ],
+                });
+            await setupContext.SaveChangesAsync();
+        }
+
+        using (var trackedContext = new AsSplitPermissionDbContext(builder.Options))
+        {
+            var results = await trackedContext.PermissionSets
+                .Include(value => value.ResourceAccesses)
+                .Include(value => value.GlobalFlags)
+                .AsSplitQuery()
+                .Where(value => value.ResourceAccesses.Any(access => access.ResourceId == wildcardResourceId))
+                .ToListAsync();
+
+            var permissionSet = Assert.Single(results);
+            Assert.Equal(matchingId, permissionSet.Id);
+            Assert.Equal("matching", permissionSet.Code);
+            Assert.Equal(wildcardResourceId, Assert.Single(permissionSet.ResourceAccesses).ResourceId);
+            Assert.Equal("first", Assert.Single(permissionSet.GlobalFlags).FlagKey);
+            Assert.All(
+                trackedContext.ChangeTracker.Entries(),
+                entry => Assert.Equal(EntityState.Unchanged, entry.State));
+            Assert.Equal(0, await trackedContext.SaveChangesAsync());
+        }
+
+        using var noTrackingContext = new AsSplitPermissionDbContext(builder.Options);
+        var noTrackingResults = await noTrackingContext.PermissionSets
+            .Include(value => value.ResourceAccesses)
+            .Include(value => value.GlobalFlags)
+            .AsNoTracking()
+            .AsSplitQuery()
+            .Where(value => value.ResourceAccesses.Any(access => access.ResourceId == wildcardResourceId))
+            .ToListAsync();
+
+        var noTrackingPermissionSet = Assert.Single(noTrackingResults);
+        Assert.Equal(matchingId, noTrackingPermissionSet.Id);
+        Assert.Single(noTrackingPermissionSet.ResourceAccesses);
+        Assert.Single(noTrackingPermissionSet.GlobalFlags);
+        Assert.Empty(noTrackingContext.ChangeTracker.Entries());
+    }
+
+    [Fact]
+    public void LinqAsSingleQueryIsRejectedWithAnExplicitProviderLimitation()
+    {
+        var directory = TestDirectory("query-as-single-rejected-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        var exception = Assert.Throws<NotSupportedException>(
+            () => context.Entities.AsSingleQuery().ToList());
+
+        Assert.Contains("AsSingleQuery", exception.Message);
+        Assert.Contains("AsSplitQuery", exception.Message);
+    }
+
+    [Fact]
+    public void LinqAsSplitQueryDoesNotSwallowUnrelatedUnsupportedOperators()
+    {
+        var directory = TestDirectory("query-as-split-unsupported-operator-" + Guid.NewGuid().ToString("N"));
+        var builder = new DbContextOptionsBuilder<WritableDbContext>();
+        builder.UseJsonColdStoreDatabase(directory, store => store.UseFsyncOnWrite(false));
+        using var context = new WritableDbContext(builder.Options);
+
+        var exception = Assert.Throws<NotSupportedException>(
+            () => context.Entities.AsSplitQuery().Reverse().ToList());
+
+        Assert.Contains("Reverse", exception.Message);
+    }
+
+    [Fact]
     public async Task LinqThenIncludeIgnoresLegacyNavigationPayloadsBeforeTracking()
     {
         var directory = TestDirectory("query-then-include-legacy-navigation-payloads-" + Guid.NewGuid().ToString("N"));
@@ -5595,6 +5804,64 @@ public sealed class JsonColdStoreDbContextOptionsBuilderExtensionsTests
                         });
             });
         }
+    }
+
+    private sealed class AsSplitPermissionDbContext(DbContextOptions<AsSplitPermissionDbContext> options)
+        : DbContext(options)
+    {
+        public DbSet<AsSplitPermissionSet> PermissionSets => Set<AsSplitPermissionSet>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<AsSplitPermissionSet>(entity =>
+            {
+                entity.HasKey(value => value.Id);
+                entity.HasMany(value => value.ResourceAccesses)
+                    .WithOne(value => value.PermissionSet)
+                    .HasForeignKey(value => value.PermissionSetId);
+                entity.HasMany(value => value.GlobalFlags)
+                    .WithOne(value => value.PermissionSet)
+                    .HasForeignKey(value => value.PermissionSetId);
+            });
+
+            modelBuilder.Entity<AsSplitResourceAccess>().HasKey(value => value.Id);
+            modelBuilder.Entity<AsSplitGlobalFlag>().HasKey(value => value.Id);
+        }
+    }
+
+    private sealed class AsSplitPermissionSet
+    {
+        public Guid Id { get; set; }
+
+        public string Code { get; set; } = string.Empty;
+
+        public List<AsSplitResourceAccess> ResourceAccesses { get; set; } = [];
+
+        public List<AsSplitGlobalFlag> GlobalFlags { get; set; } = [];
+    }
+
+    private sealed class AsSplitResourceAccess
+    {
+        public Guid Id { get; set; }
+
+        public Guid PermissionSetId { get; set; }
+
+        public AsSplitPermissionSet? PermissionSet { get; set; }
+
+        public Guid ResourceId { get; set; }
+
+        public string ResourceType { get; set; } = string.Empty;
+    }
+
+    private sealed class AsSplitGlobalFlag
+    {
+        public Guid Id { get; set; }
+
+        public Guid PermissionSetId { get; set; }
+
+        public AsSplitPermissionSet? PermissionSet { get; set; }
+
+        public string FlagKey { get; set; } = string.Empty;
     }
 
     private sealed class ThenIncludeChannel

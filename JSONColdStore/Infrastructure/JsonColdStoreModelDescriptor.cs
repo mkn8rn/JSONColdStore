@@ -88,6 +88,13 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
             .Cast<JsonColdStoreReferenceNavigationDescriptor>()
             .OrderBy(navigation => navigation.Name, StringComparer.Ordinal)
             .ToArray();
+        var collectionNavigations = entityType.GetNavigations()
+            .Where(navigation => navigation.IsCollection && !navigation.IsOnDependent)
+            .Select(CreateCollectionNavigationDescriptor)
+            .Where(navigation => navigation is not null)
+            .Cast<JsonColdStoreCollectionNavigationDescriptor>()
+            .OrderBy(navigation => navigation.Name, StringComparer.Ordinal)
+            .ToArray();
         var skipCollectionNavigations = entityType.GetSkipNavigations()
             .Where(navigation => navigation.IsCollection)
             .Select(CreateSkipCollectionNavigationDescriptor)
@@ -104,6 +111,7 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
             new JsonColdStoreKeyDescriptor(keyProperties),
             indexes,
             referenceNavigations,
+            collectionNavigations,
             skipCollectionNavigations);
     }
 
@@ -174,6 +182,21 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
             inverse.ForeignKey.Properties.Select(property => property.Name).ToArray(),
             inverse.ForeignKey.PrincipalKey.Properties.Select(property => property.Name).ToArray());
     }
+
+    private static JsonColdStoreCollectionNavigationDescriptor? CreateCollectionNavigationDescriptor(
+        INavigation navigation)
+    {
+        var propertyInfo = navigation.PropertyInfo;
+        if (propertyInfo is null || propertyInfo.GetIndexParameters().Length > 0)
+            return null;
+
+        return new JsonColdStoreCollectionNavigationDescriptor(
+            navigation.Name,
+            navigation.TargetEntityType.ClrType,
+            propertyInfo,
+            navigation.ForeignKey.Properties.Select(property => property.Name).ToArray(),
+            navigation.ForeignKey.PrincipalKey.Properties.Select(property => property.Name).ToArray());
+    }
 }
 
 internal sealed record JsonColdStoreEntityDescriptor(
@@ -184,6 +207,7 @@ internal sealed record JsonColdStoreEntityDescriptor(
     JsonColdStoreKeyDescriptor Key,
     IReadOnlyList<JsonColdStoreIndexDescriptor> Indexes,
     IReadOnlyList<JsonColdStoreReferenceNavigationDescriptor> ReferenceNavigations,
+    IReadOnlyList<JsonColdStoreCollectionNavigationDescriptor> CollectionNavigations,
     IReadOnlyList<JsonColdStoreSkipCollectionNavigationDescriptor> SkipCollectionNavigations)
 {
     internal string CreateRecordId(object? keyValue) => Key.CreateRecordId(keyValue);
@@ -229,6 +253,10 @@ internal sealed record JsonColdStoreEntityDescriptor(
 
     internal JsonColdStoreReferenceNavigationDescriptor? FindReferenceNavigation(string navigationName) =>
         ReferenceNavigations.FirstOrDefault(navigation =>
+            string.Equals(navigation.Name, navigationName, StringComparison.Ordinal));
+
+    internal JsonColdStoreCollectionNavigationDescriptor? FindCollectionNavigation(string navigationName) =>
+        CollectionNavigations.FirstOrDefault(navigation =>
             string.Equals(navigation.Name, navigationName, StringComparison.Ordinal));
 
     internal JsonColdStoreSkipCollectionNavigationDescriptor? FindSkipCollectionNavigation(string navigationName) =>
@@ -400,6 +428,47 @@ internal sealed record JsonColdStoreReferenceNavigationDescriptor(
     }
 }
 
+internal sealed record JsonColdStoreCollectionNavigationDescriptor(
+    string Name,
+    Type TargetClrType,
+    PropertyInfo PropertyInfo,
+    IReadOnlyList<string> ForeignKeyPropertyNames,
+    IReadOnlyList<string> PrincipalKeyPropertyNames)
+{
+    internal object? CreateSourceKeyValue(
+        JsonColdStoreEntityDescriptor targetDescriptor,
+        object targetEntity)
+    {
+        var keyValues = ForeignKeyPropertyNames
+            .Select(propertyName => targetDescriptor.FindProperty(propertyName).GetValue(targetEntity))
+            .ToArray();
+        return keyValues.Any(value => value is null)
+            ? null
+            : keyValues.Length == 1
+                ? keyValues[0]
+                : keyValues;
+    }
+
+    internal object? CreatePrincipalKeyValue(
+        JsonColdStoreEntityDescriptor sourceDescriptor,
+        object sourceEntity)
+    {
+        var keyValues = PrincipalKeyPropertyNames
+            .Select(propertyName => sourceDescriptor.FindProperty(propertyName).GetValue(sourceEntity))
+            .ToArray();
+        return keyValues.Any(value => value is null)
+            ? null
+            : keyValues.Length == 1
+                ? keyValues[0]
+                : keyValues;
+    }
+
+    internal void SetCollection(object entity, IReadOnlyList<object> values)
+    {
+        JsonColdStoreCollectionAccessor.Set(PropertyInfo, Name, TargetClrType, entity, values);
+    }
+}
+
 internal sealed record JsonColdStoreSkipCollectionNavigationDescriptor(
     string Name,
     Type TargetClrType,
@@ -453,14 +522,27 @@ internal sealed record JsonColdStoreSkipCollectionNavigationDescriptor(
 
     internal void SetCollection(object entity, IReadOnlyList<object> values)
     {
+        JsonColdStoreCollectionAccessor.Set(PropertyInfo, Name, TargetClrType, entity, values);
+    }
+}
+
+internal static class JsonColdStoreCollectionAccessor
+{
+    internal static void Set(
+        PropertyInfo propertyInfo,
+        string name,
+        Type targetClrType,
+        object entity,
+        IReadOnlyList<object> values)
+    {
         ArgumentNullException.ThrowIfNull(entity);
-        var collection = PropertyInfo.GetValue(entity);
+        var collection = propertyInfo.GetValue(entity);
         if (collection is null)
         {
-            collection = Activator.CreateInstance(typeof(List<>).MakeGenericType(TargetClrType))
+            collection = Activator.CreateInstance(typeof(List<>).MakeGenericType(targetClrType))
                 ?? throw new InvalidOperationException(
-                    $"The include collection '{Name}' could not be created.");
-            PropertyInfo.SetValue(entity, collection);
+                    $"The include collection '{name}' could not be created.");
+            propertyInfo.SetValue(entity, collection);
         }
 
         if (collection is IList list)
@@ -473,10 +555,10 @@ internal sealed record JsonColdStoreSkipCollectionNavigationDescriptor(
 
         var clear = collection.GetType().GetMethod(nameof(ICollection<object>.Clear), Type.EmptyTypes)
             ?? throw new InvalidOperationException(
-                $"The include collection '{Name}' cannot be cleared.");
-        var add = collection.GetType().GetMethod(nameof(ICollection<object>.Add), [TargetClrType])
+                $"The include collection '{name}' cannot be cleared.");
+        var add = collection.GetType().GetMethod(nameof(ICollection<object>.Add), [targetClrType])
             ?? throw new InvalidOperationException(
-                $"The include collection '{Name}' cannot be populated.");
+                $"The include collection '{name}' cannot be populated.");
 
         clear.Invoke(collection, null);
         foreach (var value in values)

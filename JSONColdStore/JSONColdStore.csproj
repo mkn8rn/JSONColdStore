@@ -9,8 +9,8 @@
     <Authors>mkn8rn</Authors>
     <Description>EF Core provider foundation for durable local JSON cold storage.</Description>
     <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/supprocom/JSONColdStore</RepositoryUrl>
-    <PackageProjectUrl>https://github.com/supprocom/JSONColdStore</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Supprocom/JSONColdStore</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/Supprocom/JSONColdStore</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IsPackable>true</IsPackable>

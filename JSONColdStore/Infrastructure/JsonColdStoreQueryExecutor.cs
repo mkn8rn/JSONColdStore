@@ -375,7 +375,7 @@ internal static class JsonColdStoreQueryExecutor
         }
 
         var updatedRecordIds = matched
-            .Select(entityDescriptor.CreateRecordIdFromEntity)
+            .Select(entity => entityDescriptor.CreateRecordIdFromEntity(entity))
             .ToHashSet(StringComparer.Ordinal);
         await ValidateExecuteUpdateUniqueIndexesAsync(
                 entityStore,
@@ -918,7 +918,10 @@ internal static class JsonColdStoreQueryExecutor
         if (existing is not null)
             return existing;
 
-        queryContext.Context.Entry(entity).State = EntityState.Unchanged;
+        var entry = queryContext.Context.Entry(entity);
+        entry.State = EntityState.Unchanged;
+        JsonColdStoreShadowPropertyStore.ApplyTo(queryContext.Context, entity, entityDescriptor);
+        entry.State = EntityState.Unchanged;
         return entity;
     }
 

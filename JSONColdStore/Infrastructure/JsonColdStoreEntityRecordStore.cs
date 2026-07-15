@@ -4,6 +4,7 @@ using System.Linq.Expressions;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using JSONColdStore.Storage;
+using Microsoft.EntityFrameworkCore.Update;
 
 namespace JSONColdStore.Infrastructure;
 
@@ -79,25 +80,39 @@ internal sealed class JsonColdStoreEntityRecordStore
             cancellationToken);
     }
 
+    internal Task WriteEntityAsync(
+        object entity,
+        JsonColdStoreEntityDescriptor descriptor,
+        IReadOnlySet<string>? ignoredRecordIds,
+        CancellationToken cancellationToken = default) =>
+        WriteEntityAsync(
+            entity,
+            descriptor,
+            ignoredRecordIds,
+            updateEntry: null,
+            cancellationToken);
+
     internal async Task WriteEntityAsync(
         object entity,
         JsonColdStoreEntityDescriptor descriptor,
         IReadOnlySet<string>? ignoredRecordIds,
+        IUpdateEntry? updateEntry,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(entity);
         ArgumentNullException.ThrowIfNull(descriptor);
 
         await EnsureModelCatalogAsync(createIfMissing: true, cancellationToken);
-        var recordId = descriptor.CreateRecordIdFromEntity(entity);
+        var recordId = descriptor.CreateRecordIdFromEntity(entity, updateEntry);
         await EnsureUniqueIndexesAsync(
             descriptor,
             entity,
             recordId,
             ignoredRecordIds,
+            updateEntry,
             cancellationToken);
         var payload = JsonSerializer.SerializeToUtf8Bytes(
-            descriptor.CreateRecordPayload(entity),
+            descriptor.CreateRecordPayload(entity, updateEntry),
             EntityWriteJsonOptions);
 
         await _session.Records.WriteRecordAsync(
@@ -106,7 +121,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             payload,
             cancellationToken);
 
-        await UpsertIndexesAsync(descriptor, entity, recordId, cancellationToken);
+        await UpsertIndexesAsync(descriptor, entity, recordId, updateEntry, cancellationToken);
         _session.LegacyRecords.DeleteRecordIfExists(descriptor, recordId);
     }
 
@@ -156,22 +171,36 @@ internal sealed class JsonColdStoreEntityRecordStore
             cancellationToken);
     }
 
+    internal Task ValidateUniqueIndexesAsync(
+        object entity,
+        JsonColdStoreEntityDescriptor descriptor,
+        IReadOnlySet<string>? ignoredRecordIds = null,
+        CancellationToken cancellationToken = default) =>
+        ValidateUniqueIndexesAsync(
+            entity,
+            descriptor,
+            ignoredRecordIds,
+            updateEntry: null,
+            cancellationToken);
+
     internal async Task ValidateUniqueIndexesAsync(
         object entity,
         JsonColdStoreEntityDescriptor descriptor,
         IReadOnlySet<string>? ignoredRecordIds = null,
+        IUpdateEntry? updateEntry = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(entity);
         ArgumentNullException.ThrowIfNull(descriptor);
 
         await EnsureModelCatalogAsync(createIfMissing: true, cancellationToken);
-        var recordId = descriptor.CreateRecordIdFromEntity(entity);
+        var recordId = descriptor.CreateRecordIdFromEntity(entity, updateEntry);
         await EnsureUniqueIndexesAsync(
             descriptor,
             entity,
             recordId,
             ignoredRecordIds,
+            updateEntry,
             cancellationToken);
     }
 
@@ -995,6 +1024,7 @@ internal sealed class JsonColdStoreEntityRecordStore
         JsonColdStoreEntityDescriptor descriptor,
         object entity,
         string recordId,
+        IUpdateEntry? updateEntry,
         CancellationToken cancellationToken)
     {
         foreach (var index in descriptor.Indexes)
@@ -1002,7 +1032,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             await _indexStore.UpsertAsync(
                 descriptor.EntityName,
                 index.StorageName,
-                index.CreateIndexKeyFromEntity(entity),
+                index.CreateIndexKeyFromEntity(entity, updateEntry),
                 recordId,
                 cancellationToken);
         }
@@ -1025,16 +1055,31 @@ internal sealed class JsonColdStoreEntityRecordStore
         }
     }
 
+    private Task EnsureUniqueIndexesAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        object entity,
+        string recordId,
+        IReadOnlySet<string>? ignoredRecordIds,
+        CancellationToken cancellationToken) =>
+        EnsureUniqueIndexesAsync(
+            descriptor,
+            entity,
+            recordId,
+            ignoredRecordIds,
+            updateEntry: null,
+            cancellationToken);
+
     private async Task EnsureUniqueIndexesAsync(
         JsonColdStoreEntityDescriptor descriptor,
         object entity,
         string recordId,
         IReadOnlySet<string>? ignoredRecordIds,
+        IUpdateEntry? updateEntry,
         CancellationToken cancellationToken)
     {
         foreach (var index in descriptor.Indexes.Where(index => index.IsUnique))
         {
-            var indexKey = index.CreateIndexKeyFromEntity(entity);
+            var indexKey = index.CreateIndexKeyFromEntity(entity, updateEntry);
             EnsureCurrentIndexAvailable(descriptor, index);
             var currentRecordIds = await _indexStore.ReadRecordIdsAsync(
                 descriptor.EntityName,
@@ -1062,6 +1107,7 @@ internal sealed class JsonColdStoreEntityRecordStore
                 recordId,
                 indexKey,
                 ignoredRecordIds,
+                updateEntry,
                 cancellationToken);
         }
     }
@@ -1107,6 +1153,24 @@ internal sealed class JsonColdStoreEntityRecordStore
         }
     }
 
+    private Task EnsureLegacyUniqueIndexAsync(
+        JsonColdStoreEntityDescriptor descriptor,
+        JsonColdStoreIndexDescriptor index,
+        object entity,
+        string recordId,
+        string indexKey,
+        IReadOnlySet<string>? ignoredRecordIds,
+        CancellationToken cancellationToken) =>
+        EnsureLegacyUniqueIndexAsync(
+            descriptor,
+            index,
+            entity,
+            recordId,
+            indexKey,
+            ignoredRecordIds,
+            updateEntry: null,
+            cancellationToken);
+
     private async Task EnsureLegacyUniqueIndexAsync(
         JsonColdStoreEntityDescriptor descriptor,
         JsonColdStoreIndexDescriptor index,
@@ -1114,6 +1178,7 @@ internal sealed class JsonColdStoreEntityRecordStore
         string recordId,
         string indexKey,
         IReadOnlySet<string>? ignoredRecordIds,
+        IUpdateEntry? updateEntry,
         CancellationToken cancellationToken)
     {
         await EnsureLegacyUniqueIndexAsync(
@@ -1121,7 +1186,7 @@ internal sealed class JsonColdStoreEntityRecordStore
             index,
             recordId,
             indexKey,
-            index.Properties[0].GetValue(entity) ?? string.Empty,
+            index.Properties[0].GetValue(entity, updateEntry) ?? string.Empty,
             ignoredRecordIds,
             cancellationToken);
     }
@@ -1348,7 +1413,28 @@ internal sealed class JsonColdStoreEntityRecordStore
             writer.WriteEndObject();
         }
 
-        return JsonSerializer.Deserialize(filtered.WrittenSpan, descriptor.ClrType, EntityReadJsonOptions);
+        var entity = JsonSerializer.Deserialize(filtered.WrittenSpan, descriptor.ClrType, EntityReadJsonOptions);
+        if (entity is not null)
+            CaptureShadowPropertyValues(document.RootElement, descriptor, entity);
+
+        return entity;
+    }
+
+    private static void CaptureShadowPropertyValues(
+        JsonElement document,
+        JsonColdStoreEntityDescriptor descriptor,
+        object entity)
+    {
+        foreach (var property in descriptor.Properties.Where(property => property.IsShadowProperty))
+        {
+            if (!TryGetJsonProperty(document, property.Name, out var value))
+                continue;
+
+            JsonColdStoreShadowPropertyStore.Set(
+                entity,
+                property.Name,
+                ConvertJsonValue(value, property.ClrType, descriptor.EntityName, property.Name));
+        }
     }
 
     private static bool TryGetJsonProperty(

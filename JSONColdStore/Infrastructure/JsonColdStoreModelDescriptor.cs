@@ -1,7 +1,10 @@
 using System.Collections;
 using System.Globalization;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Update;
 
 namespace JSONColdStore.Infrastructure;
 
@@ -124,7 +127,8 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
         if (propertyInfo?.GetIndexParameters().Length > 0)
             propertyInfo = null;
 
-        if (propertyInfo is null && !entityType.HasSharedClrType)
+        var isShadowProperty = property.IsShadowProperty();
+        if (propertyInfo is null && !entityType.HasSharedClrType && !isShadowProperty)
         {
             throw new NotSupportedException(
                 $"JSONColdStore {usage} on entity '{entityType.Name}' must use CLR property-backed members.");
@@ -133,7 +137,9 @@ internal sealed record JsonColdStoreModelDescriptor(IReadOnlyList<JsonColdStoreE
         return new JsonColdStorePropertyDescriptor(
             property.Name,
             property.ClrType,
-            propertyInfo);
+            propertyInfo,
+            property,
+            isShadowProperty);
     }
 
     private static string GetStorageEntityName(IEntityType entityType) =>
@@ -212,7 +218,7 @@ internal sealed record JsonColdStoreEntityDescriptor(
 {
     internal string CreateRecordId(object? keyValue) => Key.CreateRecordId(keyValue);
 
-    internal string CreateRecordIdFromEntity(object entity)
+    internal string CreateRecordIdFromEntity(object entity, IUpdateEntry? updateEntry = null)
     {
         ArgumentNullException.ThrowIfNull(entity);
         if (!ClrType.IsInstanceOfType(entity))
@@ -221,10 +227,12 @@ internal sealed record JsonColdStoreEntityDescriptor(
                 $"The entity instance is not assignable to '{ClrType.FullName ?? ClrType.Name}'.");
         }
 
-        return Key.CreateRecordIdFromEntity(entity);
+        return Key.CreateRecordIdFromEntity(entity, updateEntry);
     }
 
-    internal IReadOnlyDictionary<string, object?> CreateRecordPayload(object entity)
+    internal IReadOnlyDictionary<string, object?> CreateRecordPayload(
+        object entity,
+        IUpdateEntry? updateEntry = null)
     {
         ArgumentNullException.ThrowIfNull(entity);
         if (!ClrType.IsInstanceOfType(entity))
@@ -235,7 +243,7 @@ internal sealed record JsonColdStoreEntityDescriptor(
 
         return Properties.ToDictionary(
             property => property.Name,
-            property => property.GetValue(entity),
+            property => property.GetValue(entity, updateEntry),
             StringComparer.Ordinal);
     }
 
@@ -272,9 +280,11 @@ internal sealed record JsonColdStoreEntityDescriptor(
 internal sealed record JsonColdStorePropertyDescriptor(
     string Name,
     Type ClrType,
-    PropertyInfo? PropertyInfo)
+    PropertyInfo? PropertyInfo,
+    IProperty? Metadata = null,
+    bool IsShadowProperty = false)
 {
-    internal object? GetValue(object entity)
+    internal object? GetValue(object entity, IUpdateEntry? updateEntry = null)
     {
         ArgumentNullException.ThrowIfNull(entity);
         if (PropertyInfo is not null)
@@ -291,6 +301,24 @@ internal sealed record JsonColdStorePropertyDescriptor(
         {
             return value;
         }
+
+        if (updateEntry is not null)
+        {
+            if (Metadata is null)
+                throw new InvalidOperationException(
+                    $"The JSONColdStore property '{Name}' has no EF metadata.");
+
+            return updateEntry.GetCurrentValue(Metadata);
+        }
+
+        if (IsShadowProperty
+            && JsonColdStoreShadowPropertyStore.TryGet(entity, Name, out var shadowValue))
+        {
+            return shadowValue;
+        }
+
+        if (IsShadowProperty)
+            return ClrType.IsValueType ? Activator.CreateInstance(ClrType) : null;
 
         throw new InvalidOperationException(
             $"The JSONColdStore property '{Name}' is not available on the shared-type entity instance.");
@@ -317,8 +345,65 @@ internal sealed record JsonColdStorePropertyDescriptor(
             return;
         }
 
+        if (IsShadowProperty)
+        {
+            JsonColdStoreShadowPropertyStore.Set(entity, Name, value);
+            return;
+        }
+
         throw new InvalidOperationException(
             $"The JSONColdStore property '{Name}' cannot be assigned on the shared-type entity instance.");
+    }
+}
+
+internal static class JsonColdStoreShadowPropertyStore
+{
+    private sealed class ShadowValues
+    {
+        internal Dictionary<string, object?> Values { get; } = new(StringComparer.Ordinal);
+    }
+
+    private static readonly ConditionalWeakTable<object, ShadowValues> Values = new();
+
+    internal static void Set(object entity, string propertyName, object? value)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        ArgumentException.ThrowIfNullOrWhiteSpace(propertyName);
+        Values.GetOrCreateValue(entity).Values[propertyName] = value;
+    }
+
+    internal static bool TryGet(object entity, string propertyName, out object? value)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+        ArgumentException.ThrowIfNullOrWhiteSpace(propertyName);
+
+        if (Values.TryGetValue(entity, out var shadowValues)
+            && shadowValues.Values.TryGetValue(propertyName, out value))
+        {
+            return true;
+        }
+
+        value = null;
+        return false;
+    }
+
+    internal static void ApplyTo(
+        DbContext context,
+        object entity,
+        JsonColdStoreEntityDescriptor descriptor)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(entity);
+        ArgumentNullException.ThrowIfNull(descriptor);
+
+        if (!Values.TryGetValue(entity, out var shadowValues))
+            return;
+
+        foreach (var property in descriptor.Properties.Where(property => property.IsShadowProperty))
+        {
+            if (shadowValues.Values.TryGetValue(property.Name, out var value))
+                context.Entry(entity).Property(property.Name).CurrentValue = value;
+        }
     }
 }
 
@@ -340,8 +425,8 @@ internal sealed record JsonColdStoreKeyDescriptor(IReadOnlyList<JsonColdStorePro
             "Composite JSONColdStore primary keys require one key value per key property.");
     }
 
-    internal string CreateRecordIdFromEntity(object entity) =>
-        CreateRecordId(Properties.Select(property => property.GetValue(entity)).ToArray());
+    internal string CreateRecordIdFromEntity(object entity, IUpdateEntry? updateEntry = null) =>
+        CreateRecordId(Properties.Select(property => property.GetValue(entity, updateEntry)).ToArray());
 
     private string CreateRecordId(IReadOnlyList<object?> keyValues)
     {
@@ -378,10 +463,10 @@ internal sealed record JsonColdStoreIndexDescriptor(
 {
     internal string StorageName => string.Join("__", PropertyNames);
 
-    internal string CreateIndexKeyFromEntity(object entity)
+    internal string CreateIndexKeyFromEntity(object entity, IUpdateEntry? updateEntry = null)
     {
         ArgumentNullException.ThrowIfNull(entity);
-        return CreateIndexKey(Properties.Select(property => property.GetValue(entity)));
+        return CreateIndexKey(Properties.Select(property => property.GetValue(entity, updateEntry)));
     }
 
     internal string CreateIndexKeyFromValues(params object?[] values)

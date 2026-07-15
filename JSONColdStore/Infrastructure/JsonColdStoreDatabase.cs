@@ -117,6 +117,7 @@ internal sealed class JsonColdStoreDatabase : IDatabase
                         entity,
                         descriptor,
                         ignoredRecordIds,
+                        entry,
                         cancellationToken);
                     saved++;
                     break;
@@ -152,7 +153,7 @@ internal sealed class JsonColdStoreDatabase : IDatabase
 
             var entity = entry.ToEntityEntry().Entity;
             var descriptor = modelDescriptor.FindEntity(entry.EntityType);
-            var recordId = descriptor.CreateRecordIdFromEntity(entity);
+            var recordId = descriptor.CreateRecordIdFromEntity(entity, entry);
 
             if (entry.EntityState == EntityState.Deleted)
             {
@@ -161,13 +162,13 @@ internal sealed class JsonColdStoreDatabase : IDatabase
             }
 
             var payload = JsonSerializer.SerializeToUtf8Bytes(
-                descriptor.CreateRecordPayload(entity),
+                descriptor.CreateRecordPayload(entity, entry),
                 EntityWriteJsonOptions);
             var indexValues = descriptor.Indexes
                 .Select(index => new JsonColdStoreTransactionalIndexValue(
                     index,
-                    index.CreateIndexKeyFromEntity(entity),
-                    index.Properties.Select(property => property.GetValue(entity)).ToArray()))
+                    index.CreateIndexKeyFromEntity(entity, entry),
+                    index.Properties.Select(property => property.GetValue(entity, entry)).ToArray()))
                 .ToArray();
 
             operations.Add(new JsonColdStoreTransactionalWrite(
@@ -194,7 +195,7 @@ internal sealed class JsonColdStoreDatabase : IDatabase
 
             var entity = entry.ToEntityEntry().Entity;
             var descriptor = modelDescriptor.FindEntity(entry.EntityType);
-            var recordId = descriptor.CreateRecordIdFromEntity(entity);
+            var recordId = descriptor.CreateRecordIdFromEntity(entity, entry);
 
             if (entry.EntityState == EntityState.Deleted)
             {
@@ -212,7 +213,8 @@ internal sealed class JsonColdStoreDatabase : IDatabase
                 entity,
                 entry.EntityType.ClrType,
                 descriptor,
-                recordId));
+                recordId,
+                entry));
         }
 
         return new JsonColdStorePendingChanges(writes, deletedRecordIdsByEntity);
@@ -232,7 +234,7 @@ internal sealed class JsonColdStoreDatabase : IDatabase
 
             foreach (var index in write.Descriptor.Indexes.Where(index => index.IsUnique))
             {
-                var indexKey = index.CreateIndexKeyFromEntity(write.Entity);
+                var indexKey = index.CreateIndexKeyFromEntity(write.Entity, write.Entry);
                 var pendingKey = string.Join(
                     '\u001F',
                     write.Descriptor.EntityName,
@@ -261,6 +263,7 @@ internal sealed class JsonColdStoreDatabase : IDatabase
                 write.Entity,
                 write.Descriptor,
                 ignoredRecordIds,
+                write.Entry,
                 cancellationToken);
         }
     }
@@ -273,7 +276,8 @@ internal sealed class JsonColdStoreDatabase : IDatabase
         object Entity,
         Type EntityType,
         JsonColdStoreEntityDescriptor Descriptor,
-        string RecordId);
+        string RecordId,
+        IUpdateEntry Entry);
 
     private sealed record JsonColdStorePendingUniqueKey(string RecordId);
 }
